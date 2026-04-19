@@ -1,0 +1,22 @@
+# Core dependencies
+numpy>=1.24.0
+opencv-python>=4.8.0
+
+# Optional - Face detection/recognition
+# deepface>=0.0.81
+
+# Optional - Hand detection
+# mediapipe>=0.10.0
+
+# Optional - Action execution
+# pyautogui>=0.9.54
+# requests>=2.28.0
+
+# Optional - Server
+# websockets>=12.0
+# fastapi>=0.104.0
+# uvicorn>=0.24.0
+
+# Development
+# pytest>=7.0.0
+# pytest-cov>=4.0.0
