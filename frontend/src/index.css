@@ -155,7 +155,8 @@ header h1 {
   overflow: hidden;
 }
 
-.camera-container video {
+.camera-container video,
+.camera-container img {
   width: 100%;
   height: 100%;
   object-fit: cover;
@@ -299,5 +300,176 @@ header h1 {
   align-items: center;
   justify-content: center;
   height: 100%;
+  color: #9ca3af;
+}
+
+/* ── Last action & cooldown bar ───────────────────────────────────────────── */
+
+.last-action {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.5rem 0;
+}
+
+.last-action-empty {
+  color: #9ca3af;
+  font-size: 0.875rem;
+}
+
+.last-action-info {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.last-action-emoji {
+  font-size: 1.5rem;
+  line-height: 1;
+}
+
+.last-action-label {
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.last-action-gesture {
+  font-size: 0.75rem;
+  color: #6b7280;
+  text-transform: capitalize;
+}
+
+.last-action-status {
+  margin-left: auto;
+  font-size: 0.75rem;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.last-action-status.ready   { color: #22c55e; }
+.last-action-status.cooling { color: #f59e0b; }
+
+.cooldown-bar-container {
+  height: 6px;
+  background: #e5e7eb;
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.cooldown-bar {
+  height: 100%;
+  background: #f59e0b;
+  border-radius: 999px;
+  transition: width 0.05s linear;
+}
+
+/* ── Command list & form ──────────────────────────────────────────────────── */
+
+.card-header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.5rem;
+}
+
+.btn-sm {
+  padding: 0.25rem 0.625rem;
+  font-size: 0.8rem;
+}
+
+.cmd-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+  margin-top: 0.5rem;
+}
+
+.cmd-item {
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.cmd-item-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.4rem 0.5rem;
+  background: #f9fafb;
+  border-radius: 6px;
+}
+
+.cmd-label {
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+
+.cmd-type {
+  margin-left: 0.5rem;
+  font-size: 0.7rem;
+  color: #6b7280;
+  background: #e5e7eb;
+  padding: 0.1rem 0.35rem;
+  border-radius: 3px;
+}
+
+.cmd-item-actions {
+  display: flex;
+  gap: 0.25rem;
+}
+
+.btn-icon {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 0.875rem;
+  padding: 0.125rem;
+  opacity: 0.7;
+  line-height: 1;
+}
+
+.btn-icon:hover          { opacity: 1; }
+.btn-icon.btn-danger:hover { filter: sepia(1) saturate(5) hue-rotate(-30deg); }
+
+.cmd-form {
+  background: #f0f9ff;
+  border: 1px solid #bae6fd;
+  border-radius: 6px;
+  padding: 0.625rem 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+}
+
+.cmd-form-row {
+  display: grid;
+  grid-template-columns: 90px 1fr;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.cmd-form-row label {
+  font-size: 0.75rem;
+  color: #374151;
+  font-weight: 500;
+}
+
+.cmd-form-row input,
+.cmd-form-row select {
+  width: 100%;
+  padding: 0.25rem 0.4rem;
+  font-size: 0.8rem;
+  border: 1px solid #d1d5db;
+  border-radius: 4px;
+  background: white;
+}
+
+.cmd-form-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.25rem;
+}
+
+.empty-hint {
+  font-size: 0.875rem;
   color: #9ca3af;
 }

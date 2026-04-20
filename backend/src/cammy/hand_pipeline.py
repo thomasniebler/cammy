@@ -39,15 +39,22 @@ def _check_mediapipe():
         import mediapipe as mp
 
         return True
-    except ImportError:
+    except Exception:
         return False
 
 
 MEDIAPIPE_AVAILABLE = _check_mediapipe()
 
 
+_HAND_MODEL_PATH = "~/.config/cammy/models/hand_landmarker.task"
+_HAND_MODEL_URL = (
+    "https://storage.googleapis.com/mediapipe-models/"
+    "hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
+)
+
+
 class HandDetector:
-    """Hand landmark detector using MediaPipe Hands."""
+    """Hand landmark detector using MediaPipe HandLandmarker (Tasks API)."""
 
     def __init__(
         self,
@@ -56,42 +63,44 @@ class HandDetector:
         min_tracking_confidence: float = 0.5,
         model_complexity: int = 1,
     ):
-        """Initialize hand detector.
-
-        Args:
-            max_hands: Maximum hands to detect
-            min_detection_confidence: Minimum detection confidence
-            min_tracking_confidence: Minimum tracking confidence
-            model_complexity: 0=lite, 1=full
-        """
         self._max_hands = max_hands
         self._min_detection_confidence = min_detection_confidence
         self._min_tracking_confidence = min_tracking_confidence
-        self._model_complexity = model_complexity
         self._detector = None
-        self._drawing_utils = None
+        self._mp = None
         self._initialize()
 
     def _initialize(self) -> None:
-        """Initialize the detector."""
         if not MEDIAPIPE_AVAILABLE:
             logger.warning("MediaPipe not available for hand detection")
             return
 
         try:
+            import os
             import mediapipe as mp
+            from mediapipe.tasks import python as mp_tasks
+            from mediapipe.tasks.python import vision
 
-            self._detector = mp.solutions.hands.Hands(
-                max_num_hands=self._max_hands,
-                min_detection_confidence=self._min_detection_confidence,
+            model_path = os.path.expanduser(_HAND_MODEL_PATH)
+            if not os.path.exists(model_path):
+                logger.warning(
+                    f"Hand landmarker model not found at {model_path}. "
+                    f"Download with: curl -L {_HAND_MODEL_URL} -o {model_path}"
+                )
+                return
+
+            base_options = mp_tasks.BaseOptions(model_asset_path=model_path)
+            options = vision.HandLandmarkerOptions(
+                base_options=base_options,
+                running_mode=vision.RunningMode.IMAGE,
+                num_hands=self._max_hands,
+                min_hand_detection_confidence=self._min_detection_confidence,
+                min_hand_presence_confidence=0.5,
                 min_tracking_confidence=self._min_tracking_confidence,
-                model_complexity=self._model_complexity,
             )
-            self._drawing_utils = mp.solutions.drawing_utils
-            logger.info(
-                f"Hand detector initialized (max_hands={self._max_hands}, "
-                f"complexity={self._model_complexity})"
-            )
+            self._detector = vision.HandLandmarker.create_from_options(options)
+            self._mp = mp
+            logger.info(f"Hand detector initialized (max_hands={self._max_hands})")
         except Exception as e:
             logger.warning(f"MediaPipe hand init failed: {e}")
 
@@ -107,61 +116,35 @@ class HandDetector:
         if self._detector is None:
             return []
 
-        # Convert to RGB
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        results = self._detector.process(rgb_frame)
+        mp_image = self._mp.Image(
+            image_format=self._mp.ImageFormat.SRGB, data=rgb_frame
+        )
+        result = self._detector.detect(mp_image)
 
         hands = []
-        if results.multi_hand_landmarks:
-            # Get handedness if available
-            handedness = results.multi_handedness if results.multi_handedness else []
+        for idx, landmarks in enumerate(result.hand_landmarks):
+            hand_type = HandType.UNKNOWN
+            confidence = 1.0
+            if idx < len(result.handedness) and result.handedness[idx]:
+                h = result.handedness[idx][0]
+                hand_type = HandType.LEFT if h.category_name == "Left" else HandType.RIGHT
+                confidence = h.score
 
-            for idx, landmarks in enumerate(results.multi_hand_landmarks):
-                # Get hand type (left/right)
-                hand_type = HandType.UNKNOWN
-                if idx < len(handedness):
-                    hand_classification = handedness[idx].classification
-                    if hand_classification:
-                        label = hand_classification[0].label
-                        hand_type = HandType.LEFT if label == "Left" else HandType.RIGHT
-
-                # Extract landmark coordinates (normalized)
-                landmark_list = []
-                for lm in landmarks.landmark:
-                    landmark_list.append([lm.x, lm.y, lm.z])
-
-                # Get detection confidence
-                confidence = 1.0
-                if idx < len(handedness):
-                    confidence = handedness[idx].classification[0].score
-
-                hands.append(
-                    {
-                        "landmarks": landmark_list,
-                        "hand_type": hand_type,
-                        "confidence": confidence,
-                    }
-                )
+            landmark_list = [[lm.x, lm.y, lm.z] for lm in landmarks]
+            hands.append(
+                {
+                    "landmarks": landmark_list,
+                    "hand_type": hand_type,
+                    "confidence": confidence,
+                }
+            )
 
         return hands
 
     def draw_landmarks(
         self, frame: np.ndarray, landmarks: List[List[float]]
     ) -> np.ndarray:
-        """Draw hand landmarks on frame (for visualization).
-
-        Args:
-            frame: Image frame
-            landmarks: Hand landmarks
-
-        Returns:
-            Frame with landmarks drawn
-        """
-        if self._drawing_utils is None or landmarks is None:
-            return frame
-
-        # Convert landmarks back to MediaPipe format
-        # This is a simplified version - in production would use proper conversion
         return frame
 
     def close(self) -> None:
@@ -265,8 +248,12 @@ class GestureClassifier:
         ring_ext = is_extended(ring_tip, ring_pip)
         pinky_ext = is_extended(pinky_tip, pinky_pip)
 
-        # Thumb extension (horizontal check for thumb)
-        thumb_ext = abs(thumb_tip[0] - thumb_ip[0]) > 0.08
+        # Thumb extension: use euclidean distance from MCP so thumbs-up/down
+        # (vertical thumb) is detected as reliably as a sideways-spread thumb.
+        thumb_mcp = landmarks[2]
+        thumb_ext = (
+            (thumb_tip[0] - thumb_mcp[0]) ** 2 + (thumb_tip[1] - thumb_mcp[1]) ** 2
+        ) ** 0.5 > 0.12
 
         # Count extended fingers
         fingers_extended = sum([index_ext, middle_ext, ring_ext, pinky_ext, thumb_ext])
@@ -277,7 +264,7 @@ class GestureClassifier:
         elif fingers_extended == 5:
             return GestureType.OPEN_PALM, 0.85
         elif (
-            fingers_extended == 4
+            fingers_extended == 2
             and index_ext
             and middle_ext
             and not ring_ext
@@ -305,16 +292,6 @@ class GestureClassifier:
             ) ** 0.5
             if thumb_index_dist < 0.08:
                 return GestureType.OK_SIGN, 0.70
-        elif (
-            not index_ext
-            and not middle_ext
-            and not ring_ext
-            and not pinky_ext
-            and thumb_ext
-        ):
-            return GestureType.THUMBS_UP if thumb_tip[1] < wrist[
-                1
-            ] else GestureType.THUMBS_DOWN, 0.70
 
         return GestureType.UNKNOWN, 0.3
 
@@ -394,10 +371,10 @@ class HandPipeline:
             # Classify gesture
             gesture, gesture_conf = self._classifier.classify(landmarks, hand_type)
 
-            # Apply confidence threshold
+            # Store combined confidence for informational purposes; filter by gesture confidence only
             combined_conf = gesture_conf * confidence
 
-            if combined_conf >= self._min_confidence:
+            if gesture_conf >= self._min_confidence:
                 hand = DetectedHand(
                     gesture=gesture,
                     gesture_confidence=combined_conf,

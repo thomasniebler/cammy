@@ -1,10 +1,5 @@
 version: '3'
 
-env:
-  PYTHON_BIN: "{{.PYTHON_BIN}}"
-  BACKEND_DIR: "./backend"
-  FRONTEND_DIR: "./frontend"
-
 tasks:
   default:
     desc: Show available tasks
@@ -14,83 +9,99 @@ tasks:
   # Installation
   install:
     desc: Install all dependencies
-    cmds:
-      - cd {{.BACKEND_DIR}} && uv pip install -e ".[dev]"
-      - cd {{.FRONTEND_DIR}} && npm install
+    deps:
+      - install-backend
+      - install-frontend
 
   install-backend:
-    desc: Install backend dependencies
+    desc: Install backend dependencies (includes dev extras)
+    dir: backend
     cmds:
-      - cd {{.BACKEND_DIR}} && uv pip install -e ".[dev]"
+      - uv sync --extra dev
 
   install-frontend:
     desc: Install frontend dependencies
+    dir: frontend
     cmds:
-      - cd {{.FRONTEND_DIR}} && npm install
+      - npm install
 
   # Development
   dev:
-    desc: Start development mode (frontend + backend)
-    cmds:
-      - task: dev-backend
-      - task: dev-frontend
+    desc: Start backend and frontend dev servers (in parallel)
+    deps:
+      - dev-backend
+      - dev-frontend
 
   dev-backend:
     desc: Start backend server
-    dir: {{.BACKEND_DIR}}
+    dir: backend
     cmds:
-      - source .venv/bin/activate && python -m cammy.main
+      - uv run python -m cammy.main
 
   dev-frontend:
     desc: Start frontend dev server
-    dir: {{.FRONTEND_DIR}}
+    dir: frontend
     cmds:
       - npm run dev
 
   # Production
   build:
     desc: Build everything for production
-    cmds:
-      - task: build-backend
-      - task: build-frontend
+    deps:
+      - build-backend
+      - build-frontend
 
   build-backend:
-    desc: Build backend (install in dev mode)
+    desc: Sync backend production dependencies
+    dir: backend
     cmds:
-      - cd {{.BACKEND_DIR}} && uv pip install -e .
+      - uv sync
 
   build-frontend:
     desc: Build frontend for production
-    dir: {{.FRONTEND_DIR}}
+    dir: frontend
     cmds:
       - npm run build
 
   # Testing
   test:
     desc: Run all tests
-    dir: {{.BACKEND_DIR}}
+    dir: backend
     cmds:
-      - source .venv/bin/activate && python -m pytest tests/ -v
+      - uv run pytest tests/ -v
 
   test-coverage:
     desc: Run tests with coverage
-    dir: {{.BACKEND_DIR}}
+    dir: backend
     cmds:
-      - source .venv/bin/activate && python -m pytest tests/ --cov=src/cammy --cov-report=html
+      - uv run pytest tests/ --cov=src/cammy --cov-report=html
 
   # Linting
   lint:
-    desc: Run linting
+    desc: Lint backend with ruff
+    dir: backend
     cmds:
-      - cd {{.BACKEND_DIR}} && uv pip install ruff && ruff check src/
-      - cd {{.FRONTEND_DIR}} && npm run lint 2>/dev/null || true
+      - uv run ruff check src/
 
   # Cleanup
   clean:
     desc: Clean up build artifacts
+    deps:
+      - clean-backend
+      - clean-frontend
+
+  clean-backend:
+    desc: Clean backend build artifacts
+    dir: backend
     cmds:
-      - cd {{.BACKEND_DIR}} && rm -rf .pytest_cache __pycache__ src/**/__pycache__
-      - cd {{.FRONTEND_DIR}} && rm -rf dist node_modules
+      - rm -rf .pytest_cache htmlcov .coverage
+      - find . -type d -name __pycache__ -exec rm -rf {} +
+
+  clean-frontend:
+    desc: Clean frontend build artifacts
+    dir: frontend
+    cmds:
+      - rm -rf dist node_modules
 
   # Docker
   docker-build:
@@ -107,6 +118,6 @@ tasks:
   info:
     desc: Show system information
     cmds:
-      - echo "Backend Python: $(python3 --version)"
-      - echo "Frontend Node: $(node --version)"
-      - echo "UV: $(uv --version)"
+      - python3 --version
+      - node --version
+      - uv --version

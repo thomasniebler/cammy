@@ -31,6 +31,7 @@ from .common.config import CammyConfig, ConfigManager, get_config_manager
 from .common.queue import ThreadSafeQueue, PipelineQueue
 from .common.metrics import SystemMetrics
 from .common.types import PipelineResult
+from .common.commands import CommandsManager
 
 
 logger = setup_logger(__name__)
@@ -53,6 +54,7 @@ class CammyApp:
         self._hand_pipeline: Optional[HandPipeline] = None
         self._action_executor: Optional[ActionExecutor] = None
         self._server: Optional[CammyServer] = None
+        self._commands_manager: Optional[CommandsManager] = None
 
         self._running = False
         self._threads: List[threading.Thread] = []
@@ -69,6 +71,9 @@ class CammyApp:
             target_fps=self._config.performance.target_fps,
         )
 
+        # Initialize commands manager (persisted user-defined commands)
+        self._commands_manager = CommandsManager()
+
         # Initialize pipelines
         self._face_pipeline = create_face_pipeline(
             threshold=self._config.detection.face_similarity_threshold,
@@ -82,12 +87,23 @@ class CammyApp:
 
         self._action_executor = create_action_executor(
             cooldown_ms=self._config.action.cooldown_ms,
+            commands_manager=self._commands_manager,
         )
 
         # Initialize server
         self._server = create_server(
             host=self._config.server.host,
             ws_port=self._config.server.port,
+        )
+
+        # Wire dependencies into REST API (also wires action_executed callback)
+        self._server.set_dependencies(
+            config_manager=get_config_manager(),
+            identity_store=self._face_pipeline.identity_store,
+            face_pipeline=self._face_pipeline,
+            action_executor=self._action_executor,
+            camera=self._camera,
+            commands_manager=self._commands_manager,
         )
 
         # Start components
@@ -140,7 +156,7 @@ class CammyApp:
             faces = self._face_pipeline.process(frame.frame)
 
             # Broadcast to server
-            if self._server and self._server.is_running():
+            if self._server and self._server.is_running:
                 self._server.broadcast_faces(faces)
 
     def _hand_processing_loop(self) -> None:
@@ -166,7 +182,7 @@ class CammyApp:
                     logger.debug(f"Executed {len(actions)} actions")
 
             # Broadcast to server
-            if self._server and self._server.is_running():
+            if self._server and self._server.is_running:
                 self._server.broadcast_gestures(hands)
 
     def stop(self) -> None:

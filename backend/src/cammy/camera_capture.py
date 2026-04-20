@@ -87,6 +87,8 @@ class CameraReader(threading.Thread):
         self._cap: Optional[cv2.VideoCapture] = None
         self._running = False
         self._frame_time = 1.0 / target_fps
+        self._latest_frame: Optional[CameraFrame] = None
+        self._latest_frame_lock = threading.Lock()
 
     def run(self) -> None:
         """Main capture loop running in thread."""
@@ -121,6 +123,10 @@ class CameraReader(threading.Thread):
                     height=frame.shape[0],
                 )
 
+                # Always update the latest-frame cache (non-destructive, used by MJPEG stream)
+                with self._latest_frame_lock:
+                    self._latest_frame = camera_frame
+
                 # Non-blocking put - drop frame if queue is full
                 if not self._frame_queue.put_nowait(camera_frame):
                     logger.debug("Frame queue full, dropping frame")
@@ -141,6 +147,11 @@ class CameraReader(threading.Thread):
     def is_running(self) -> bool:
         """Check if reader is running."""
         return self._running
+
+    def peek_latest_frame(self) -> Optional[CameraFrame]:
+        """Return the most recent frame without consuming it from the queue."""
+        with self._latest_frame_lock:
+            return self._latest_frame
 
     @property
     def frame_queue(self) -> ThreadSafeQueue:
@@ -218,14 +229,13 @@ class CameraCapture:
             return None
 
     def get_latest_frame(self) -> Optional[CameraFrame]:
-        """Get the latest frame (non-blocking).
+        """Get the most recent frame without consuming it from the processing queue.
 
-        Returns:
-            Latest CameraFrame if available
+        Safe to call from the MJPEG stream — does not starve face/hand pipelines.
         """
-        if self._frame_queue is None or self._frame_queue.empty():
+        if self._reader is None:
             return None
-        return self._frame_queue.get_nowait()
+        return self._reader.peek_latest_frame()
 
     def get_available_cameras(self) -> List[CameraInfo]:
         """Get list of available cameras."""

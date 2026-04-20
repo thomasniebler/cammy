@@ -21,6 +21,7 @@ from .types import (
     PipelineResult,
     GESTURE_ACTION_MAPPING,
 )
+from .commands import CommandDef, CommandsManager
 
 __all__ = [
     # Logging
@@ -51,4 +52,7 @@ __all__ = [
     "CameraFrame",
     "PipelineResult",
     "GESTURE_ACTION_MAPPING",
+    # Commands
+    "CommandDef",
+    "CommandsManager",
 ]

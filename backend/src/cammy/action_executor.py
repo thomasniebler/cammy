@@ -18,7 +18,7 @@ import threading
 import json
 from pathlib import Path
 from typing import Optional, Dict, Any, Callable, List
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 
 from .common.logging import setup_logger
@@ -29,6 +29,7 @@ from .common.types import (
     GestureType,
     GESTURE_ACTION_MAPPING,
 )
+from .common.commands import CommandDef, CommandsManager
 
 
 logger = setup_logger(__name__)
@@ -77,6 +78,8 @@ class ActionConfig:
     action_name: str
     payload: Dict[str, Any]
     cooldown_ms: int = 1000
+    label: str = ""
+    command_type: str = "keypress"
 
 
 class ActionMapper:
@@ -90,77 +93,171 @@ class ActionMapper:
         GestureType.PEACE: "media_next",
     }
 
-    def __init__(self, mapping: Optional[Dict[GestureType, str]] = None):
+    def __init__(
+        self,
+        mapping: Optional[Dict[GestureType, str]] = None,
+        commands_manager: Optional[CommandsManager] = None,
+    ):
         """Initialize action mapper.
 
         Args:
-            mapping: Custom gesture to action name mapping
+            mapping: Custom gesture to action name mapping (in-memory, for tests)
+            commands_manager: Persistent command store; used when provided
         """
-        self._mapping = mapping or dict(self.DEFAULT_MAPPING)
-        self._action_configs: Dict[str, ActionConfig] = {}
-        self._load_default_configs()
+        self._commands_manager = commands_manager
+        if commands_manager is not None:
+            # Persist-backed path: ignore in-memory `mapping` arg
+            self._mapping: Optional[Dict[GestureType, str]] = None
+            self._action_configs: Optional[Dict[str, ActionConfig]] = None
+        else:
+            self._mapping = mapping or dict(self.DEFAULT_MAPPING)
+            self._action_configs = {}
+            self._load_default_configs()
+
+    # ------------------------------------------------------------------ private helpers
+
+    def _gesture_key_to_type(self, key: str) -> Optional[GestureType]:
+        try:
+            return GestureType[key.upper()]
+        except KeyError:
+            return None
+
+    def _cmd_to_action_config(self, cmd: CommandDef) -> ActionConfig:
+        """Convert a CommandDef to an ActionConfig."""
+        cmd_type = cmd.type
+        # Resolve ActionType for legacy routing (best-effort)
+        action_type_map: Dict[str, ActionType] = {
+            "media_play":  ActionType.MEDIA_PLAY,
+            "media_pause": ActionType.MEDIA_PAUSE,
+            "media_next":  ActionType.MEDIA_NEXT,
+            "media_prev":  ActionType.MEDIA_PREV,
+            "volume_up":   ActionType.VOLUME_UP,
+            "volume_down": ActionType.VOLUME_DOWN,
+            "volume_mute": ActionType.VOLUME_MUTE,
+        }
+        if cmd_type == "webhook":
+            action_type = ActionType.WEBHOOK
+        elif cmd_type == "shell":
+            action_type = ActionType.SHELL
+        else:
+            action_type = action_type_map.get(cmd.name, ActionType.MEDIA_PLAY)
+        return ActionConfig(
+            action_type=action_type,
+            action_name=cmd.name,
+            payload=cmd.payload,
+            cooldown_ms=cmd.cooldown_ms,
+            label=cmd.label,
+            command_type=cmd_type,
+        )
 
     def _load_default_configs(self) -> None:
-        """Load default action configurations."""
+        """Load default action configurations (in-memory path only)."""
+        assert self._action_configs is not None
         self._action_configs = {
             "media_play": ActionConfig(
                 action_type=ActionType.MEDIA_PLAY,
                 action_name="media_play",
                 payload={"key": "play"},
+                label="Play",
+                command_type="keypress",
             ),
             "media_pause": ActionConfig(
                 action_type=ActionType.MEDIA_PAUSE,
                 action_name="media_pause",
                 payload={"key": "play"},
+                label="Pause",
+                command_type="keypress",
             ),
             "media_next": ActionConfig(
                 action_type=ActionType.MEDIA_NEXT,
                 action_name="media_next",
                 payload={"key": "nexttrack"},
+                label="Next Track",
+                command_type="keypress",
             ),
             "media_prev": ActionConfig(
                 action_type=ActionType.MEDIA_PREV,
                 action_name="media_prev",
                 payload={"key": "prevtrack"},
+                label="Prev Track",
+                command_type="keypress",
             ),
             "volume_up": ActionConfig(
                 action_type=ActionType.VOLUME_UP,
                 action_name="volume_up",
                 payload={"key": "volumeup", "count": 2},
+                label="Volume Up",
+                command_type="keypress",
             ),
             "volume_down": ActionConfig(
                 action_type=ActionType.VOLUME_DOWN,
                 action_name="volume_down",
                 payload={"key": "volumedown", "count": 2},
+                label="Volume Down",
+                command_type="keypress",
             ),
             "volume_mute": ActionConfig(
                 action_type=ActionType.VOLUME_MUTE,
                 action_name="volume_mute",
                 payload={"key": "volumemute"},
+                label="Mute",
+                command_type="keypress",
             ),
         }
 
+    # ------------------------------------------------------------------ public API
+
     def set_mapping(self, gesture: GestureType, action_name: str) -> None:
         """Set gesture to action mapping."""
-        self._mapping[gesture] = action_name
+        if self._commands_manager is not None:
+            self._commands_manager.set_gesture_mapping(gesture.name.lower(), action_name)
+        else:
+            assert self._mapping is not None
+            self._mapping[gesture] = action_name
 
     def get_action(self, gesture: GestureType) -> Optional[ActionConfig]:
         """Get action config for a gesture."""
-        action_name = self._mapping.get(gesture)
-        if action_name:
-            return self._action_configs.get(action_name)
-        return None
+        if self._commands_manager is not None:
+            mappings = self._commands_manager.get_gesture_mappings()
+            action_name = mappings.get(gesture.name.lower())
+            if not action_name:
+                return None
+            cmd = self._commands_manager.get_command(action_name)
+            if cmd is None:
+                return None
+            return self._cmd_to_action_config(cmd)
+        else:
+            assert self._mapping is not None and self._action_configs is not None
+            action_name = self._mapping.get(gesture)
+            if action_name:
+                return self._action_configs.get(action_name)
+            return None
 
     def update_action_config(self, action_name: str, config: ActionConfig) -> None:
-        """Update action configuration."""
-        self._action_configs[action_name] = config
+        """Update action configuration (in-memory path only; use CommandsManager for persistence)."""
+        if self._action_configs is not None:
+            self._action_configs[action_name] = config
 
     def get_all_mappings(self) -> Dict[GestureType, str]:
-        """Get all gesture mappings."""
+        """Get all gesture mappings as GestureType→action_name dict."""
+        if self._commands_manager is not None:
+            result: Dict[GestureType, str] = {}
+            for gesture_key, action_name in self._commands_manager.get_gesture_mappings().items():
+                g = self._gesture_key_to_type(gesture_key)
+                if g is not None:
+                    result[g] = action_name
+            return result
+        assert self._mapping is not None
         return self._mapping.copy()
 
     def get_all_actions(self) -> Dict[str, ActionConfig]:
         """Get all action configurations."""
+        if self._commands_manager is not None:
+            return {
+                name: self._cmd_to_action_config(cmd)
+                for name, cmd in self._commands_manager.get_commands().items()
+            }
+        assert self._action_configs is not None
         return self._action_configs.copy()
 
 
@@ -334,6 +431,17 @@ class ActionExecutor:
 
         self._enabled = True
 
+        # Callback called after each successful action
+        self._on_action_executed: Optional[Callable[[Dict[str, Any]], None]] = None
+
+    def set_on_action_executed(self, callback: Optional[Callable[[Dict[str, Any]], None]]) -> None:
+        """Set a callback invoked after each executed action.
+
+        The callback receives a dict with keys:
+            type, action_name, label, gesture, timestamp, cooldown_ms
+        """
+        self._on_action_executed = callback
+
     def execute(
         self,
         hands: List[DetectedHand],
@@ -368,16 +476,30 @@ class ActionExecutor:
             # Execute action
             result = self._execute_action(action_config)
 
-            action = Action(
-                action_type=action_config.action_type,
-                action_name=action_name,
-                payload=action_config.payload,
-                timestamp=time.time(),
-            )
-            executed.append(action)
-
-            # Update cooldown
+            # Update cooldown regardless to prevent rapid retries
             self._update_cooldown(action_name)
+
+            if result != ActionResult.FAILURE:
+                action = Action(
+                    action_type=action_config.action_type,
+                    action_name=action_name,
+                    payload=action_config.payload,
+                    timestamp=time.time(),
+                )
+                executed.append(action)
+
+                if self._on_action_executed is not None:
+                    try:
+                        self._on_action_executed({
+                            "type": "action_executed",
+                            "action_name": action_name,
+                            "label": action_config.label or action_name,
+                            "gesture": gesture.name.lower(),
+                            "timestamp": action.timestamp,
+                            "cooldown_ms": action_config.cooldown_ms,
+                        })
+                    except Exception as e:
+                        logger.warning(f"action_executed callback failed: {e}")
 
         return executed
 
@@ -394,25 +516,16 @@ class ActionExecutor:
             self._last_action_time[action_name] = time.time() * 1000
 
     def _execute_action(self, config: ActionConfig) -> ActionResult:
-        """Execute a single action."""
-        action_type = config.action_type
+        """Execute a single action, routing by command_type."""
+        cmd_type = config.command_type
 
-        if action_type in (
-            ActionType.MEDIA_PLAY,
-            ActionType.MEDIA_PAUSE,
-            ActionType.MEDIA_NEXT,
-            ActionType.MEDIA_PREV,
-            ActionType.VOLUME_UP,
-            ActionType.VOLUME_DOWN,
-            ActionType.VOLUME_MUTE,
-        ):
-            return self._key_press.execute(config.payload)
-        elif action_type == ActionType.WEBHOOK:
+        if cmd_type == "webhook":
             return self._webhook.execute(config.payload)
-        elif action_type == ActionType.SHELL:
+        elif cmd_type == "shell":
             return self._shell.execute(config.payload)
-
-        return ActionResult.SKIP
+        else:
+            # Default: keypress
+            return self._key_press.execute(config.payload)
 
     def set_cooldown(self, action_name: str, cooldown_ms: int) -> None:
         """Set cooldown for a specific action."""
@@ -442,15 +555,17 @@ class ActionExecutor:
 def create_action_executor(
     mapping: Optional[Dict[GestureType, str]] = None,
     cooldown_ms: int = 1000,
+    commands_manager: Optional[CommandsManager] = None,
 ) -> ActionExecutor:
     """Factory to create action executor.
 
     Args:
-        mapping: Custom gesture to action mapping
+        mapping: Custom gesture to action mapping (ignored when commands_manager provided)
         cooldown_ms: Default cooldown
+        commands_manager: Persistent command store
 
     Returns:
         ActionExecutor instance
     """
-    mapper = ActionMapper(mapping)
+    mapper = ActionMapper(mapping, commands_manager=commands_manager)
     return ActionExecutor(mapper=mapper, cooldown_ms=cooldown_ms)

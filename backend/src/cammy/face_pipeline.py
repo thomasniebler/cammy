@@ -40,7 +40,7 @@ def _check_mediapipe():
         import mediapipe
 
         return True
-    except ImportError:
+    except Exception:
         return False
 
 
@@ -50,7 +50,7 @@ def _check_deepface():
         import deepface
 
         return True
-    except ImportError:
+    except Exception:
         return False
 
 
@@ -164,42 +164,57 @@ class IdentityStore:
         return self._storage_dir
 
 
+_FACE_MODEL_PATH = "~/.config/cammy/models/face_detector.tflite"
+_FACE_MODEL_URL = (
+    "https://storage.googleapis.com/mediapipe-models/"
+    "face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite"
+)
+
+
 class FaceDetector:
-    """Face detector using MediaPipe face detection."""
+    """Face detector using MediaPipe FaceDetector (Tasks API)."""
 
     def __init__(
         self,
         min_detection_confidence: float = 0.5,
         model_selection: int = 0,
     ):
-        """Initialize face detector.
-
-        Args:
-            min_detection_confidence: Minimum detection confidence
-            model_selection: 0 for short-range, 1 for long-range
-        """
         self._min_detection_confidence = min_detection_confidence
-        self._model_selection = model_selection
         self._detector = None
+        self._mp = None
         self._initialize()
 
     def _initialize(self) -> None:
         """Initialize the detector."""
-        if MEDIAPIPE_AVAILABLE:
-            try:
-                import mediapipe as mp
-
-                self._detector = mp.solutions.face_detection.FaceDetection(
-                    model_selection=self._model_selection,
-                    min_detection_confidence=self._min_detection_confidence,
-                )
-                logger.info(
-                    f"Face detector initialized with MediaPipe (model={self._model_selection})"
-                )
-            except Exception as e:
-                logger.warning(f"MediaPipe init failed: {e}")
-        else:
+        if not MEDIAPIPE_AVAILABLE:
             logger.warning("MediaPipe not available, face detection disabled")
+            return
+
+        try:
+            import os
+            import mediapipe as mp
+            from mediapipe.tasks import python as mp_tasks
+            from mediapipe.tasks.python import vision
+
+            model_path = os.path.expanduser(_FACE_MODEL_PATH)
+            if not os.path.exists(model_path):
+                logger.warning(
+                    f"Face detector model not found at {model_path}. "
+                    f"Download with: curl -L {_FACE_MODEL_URL} -o {model_path}"
+                )
+                return
+
+            base_options = mp_tasks.BaseOptions(model_asset_path=model_path)
+            options = vision.FaceDetectorOptions(
+                base_options=base_options,
+                running_mode=vision.RunningMode.IMAGE,
+                min_detection_confidence=self._min_detection_confidence,
+            )
+            self._detector = vision.FaceDetector.create_from_options(options)
+            self._mp = mp
+            logger.info("Face detector initialized with MediaPipe Tasks API")
+        except Exception as e:
+            logger.warning(f"MediaPipe init failed: {e}")
 
     def detect(self, frame: np.ndarray) -> List[Dict[str, Any]]:
         """Detect faces in a frame.
@@ -213,33 +228,28 @@ class FaceDetector:
         if self._detector is None:
             return []
 
-        # Convert BGR to RGB
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        results = self._detector.process(rgb_frame)
+        mp_image = self._mp.Image(
+            image_format=self._mp.ImageFormat.SRGB, data=rgb_frame
+        )
+        result = self._detector.detect(mp_image)
 
         detections = []
-        if results.detections:
-            h, w = frame.shape[:2]
-            for det in results.detections:
-                box = det.location_data.relative_bounding_box
-                # Add padding to bbox
-                x = int(box.xmin * w)
-                y = int(box.ymin * h)
-                width = int(box.width * w)
-                height = int(box.height * h)
+        h, w = frame.shape[:2]
+        for det in result.detections:
+            box = det.bounding_box
+            x = max(0, box.origin_x)
+            y = max(0, box.origin_y)
+            width = min(w - x, box.width)
+            height = min(h - y, box.height)
+            confidence = det.categories[0].score if det.categories else 0.5
 
-                # Ensure bbox is within frame
-                x = max(0, x)
-                y = max(0, y)
-                width = min(w - x, width)
-                height = min(h - y, height)
-
-                detections.append(
-                    {
-                        "bbox": BoundingBox(x=x, y=y, width=width, height=height),
-                        "confidence": det.score[0],
-                    }
-                )
+            detections.append(
+                {
+                    "bbox": BoundingBox(x=x, y=y, width=width, height=height),
+                    "confidence": confidence,
+                }
+            )
 
         return detections
 
@@ -613,6 +623,11 @@ class FacePipeline:
         """Remove an identity."""
         self._recognizer.clear_cache()
         return self._identity_store.delete_identity(name)
+
+    @property
+    def identity_store(self) -> IdentityStore:
+        """Get the identity store."""
+        return self._identity_store
 
     def close(self) -> None:
         """Close the pipeline and release resources."""
