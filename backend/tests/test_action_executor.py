@@ -15,11 +15,13 @@ from cammy.action_executor import (
     KeyPressAction,
     WebhookAction,
     ShellAction,
+    MouseControlAction,
     ActionResult,
     ActionConfig,
     create_action_executor,
 )
 from cammy.common import GestureType, DetectedHand
+from cammy.common.types import ActionType
 
 
 class TestActionMapper(unittest.TestCase):
@@ -204,6 +206,206 @@ class TestCreateActionExecutor(unittest.TestCase):
         executor = create_action_executor(mapping=mapping)
 
         self.assertIsInstance(executor, ActionExecutor)
+
+
+class TestMouseControlAction(unittest.TestCase):
+    """Tests for MouseControlAction."""
+
+    def test_create(self):
+        """Test creation."""
+        action = MouseControlAction()
+        self.assertIsNotNone(action)
+
+    def test_move_without_pyautogui(self):
+        """Test move returns SKIP when pyautogui is unavailable."""
+        action = MouseControlAction()
+        action._pyautogui = None  # Force unavailable
+
+        result = action.move(0.5, 0.5)
+
+        self.assertEqual(result, ActionResult.SKIP)
+
+    def test_click_without_pyautogui(self):
+        """Test click returns SKIP when pyautogui is unavailable."""
+        action = MouseControlAction()
+        action._pyautogui = None  # Force unavailable
+
+        result = action.click()
+
+        self.assertEqual(result, ActionResult.SKIP)
+
+    def test_reset_smoothing(self):
+        """Test reset_smoothing clears EMA state."""
+        action = MouseControlAction()
+        action._smooth_x = 0.5
+        action._smooth_y = 0.5
+
+        action.reset_smoothing()
+
+        self.assertIsNone(action._smooth_x)
+        self.assertIsNone(action._smooth_y)
+
+    def test_ema_smoothing_applied(self):
+        """Test EMA smoothing is applied after the first move call."""
+        action = MouseControlAction(smoothing=0.5)
+        action._pyautogui = None  # No actual mouse movement
+
+        # Inject a dummy pyautogui to capture calls
+        calls = []
+
+        class FakePyautogui:
+            FAILSAFE = False
+            PAUSE = 0
+
+            def size(self):
+                return (1920, 1080)
+
+            def moveTo(self, x, y, duration=0):
+                calls.append((x, y))
+
+        action._pyautogui = FakePyautogui()
+        action._screen_size = (1920, 1080)
+
+        # First call – EMA initialises to the mirrored input (1-0.5 = 0.5)
+        action.move(0.5, 0.5)
+        # Second call – EMA blends: smooth_x = alpha*(1-0.9) + (1-alpha)*prev
+        #   = 0.5*0.1 + 0.5*0.5 = 0.05 + 0.25 = 0.3
+        action.move(0.9, 0.9)
+
+        self.assertEqual(len(calls), 2)
+        # First call: (1-0.5)*1920 = 960
+        self.assertEqual(calls[0][0], 960)
+        # Second call: smooth_x=0.3 → int(0.3*1920) = 576
+        expected_x = int(0.3 * 1920)
+        self.assertEqual(calls[1][0], expected_x)
+
+
+class TestActionExecutorMouseControl(unittest.TestCase):
+    """Tests for mouse control integration in ActionExecutor."""
+
+    def test_mouse_control_enabled_by_default(self):
+        """Mouse control should be enabled by default."""
+        executor = ActionExecutor()
+        self.assertTrue(executor.mouse_control_enabled)
+
+    def test_enable_disable_mouse_control(self):
+        """Test enabling and disabling mouse control."""
+        executor = ActionExecutor()
+
+        executor.disable_mouse_control()
+        self.assertFalse(executor.mouse_control_enabled)
+
+        executor.enable_mouse_control()
+        self.assertTrue(executor.mouse_control_enabled)
+
+    def test_pointing_does_not_dispatch_regular_action(self):
+        """POINTING gesture should not dispatch a regular action."""
+        executor = ActionExecutor()
+        # Map POINTING to some action to confirm it's bypassed
+        executor.mapper.update_action_config(
+            "test_action",
+            ActionConfig(
+                action_type=ActionType.CUSTOM,
+                action_name="test_action",
+                payload={},
+                command_type="shell",
+            ),
+        )
+
+        landmarks = [[float(i) * 0.05, float(i) * 0.05, 0.0] for i in range(21)]
+        hand = DetectedHand(
+            gesture=GestureType.POINTING,
+            gesture_confidence=0.9,
+            landmarks=landmarks,
+        )
+
+        actions = executor.execute([hand])
+
+        # No Action objects returned (mouse move doesn't produce Action instances)
+        self.assertEqual(len(actions), 0)
+
+    def test_ok_sign_triggers_click(self):
+        """OK_SIGN gesture should trigger a mouse click action."""
+        executor = ActionExecutor()
+
+        # Patch _mouse_control so no actual click occurs
+        clicks = []
+
+        class FakeMouseControl:
+            def click(self):
+                clicks.append(1)
+                return ActionResult.SUCCESS
+
+            def move(self, x, y):
+                return ActionResult.SUCCESS
+
+            def reset_smoothing(self):
+                pass
+
+        executor._mouse_control = FakeMouseControl()
+
+        hand = DetectedHand(
+            gesture=GestureType.OK_SIGN,
+            gesture_confidence=0.9,
+        )
+
+        actions = executor.execute([hand])
+
+        self.assertEqual(len(clicks), 1)
+        self.assertEqual(len(actions), 1)
+        self.assertEqual(actions[0].action_type, ActionType.MOUSE_CLICK)
+
+    def test_ok_sign_click_debounce(self):
+        """Second OK_SIGN within cooldown should not click again."""
+        executor = ActionExecutor()
+
+        clicks = []
+
+        class FakeMouseControl:
+            def click(self):
+                clicks.append(1)
+                return ActionResult.SUCCESS
+
+            def move(self, x, y):
+                return ActionResult.SUCCESS
+
+            def reset_smoothing(self):
+                pass
+
+        executor._mouse_control = FakeMouseControl()
+
+        hand = DetectedHand(
+            gesture=GestureType.OK_SIGN,
+            gesture_confidence=0.9,
+        )
+
+        executor.execute([hand])
+        executor.execute([hand])  # Immediate repeat – should be debounced
+
+        self.assertEqual(len(clicks), 1)
+
+    def test_detected_hand_to_dict_includes_pointer_when_pointing(self):
+        """DetectedHand.to_dict() should include pointer for POINTING gesture."""
+        landmarks = [[float(i) * 0.05, float(i) * 0.05, 0.0] for i in range(21)]
+        hand = DetectedHand(
+            gesture=GestureType.POINTING,
+            gesture_confidence=0.9,
+            landmarks=landmarks,
+        )
+
+        d = hand.to_dict()
+
+        self.assertIn("pointer", d)
+        self.assertIn("x", d["pointer"])
+        self.assertIn("y", d["pointer"])
+
+    def test_detected_hand_to_dict_no_pointer_for_other_gestures(self):
+        """DetectedHand.to_dict() should NOT include pointer for non-POINTING gestures."""
+        landmarks = [[float(i) * 0.05, float(i) * 0.05, 0.0] for i in range(21)]
+        for gesture in [GestureType.FIST, GestureType.OPEN_PALM, GestureType.THUMBS_UP]:
+            hand = DetectedHand(gesture=gesture, gesture_confidence=0.9, landmarks=landmarks)
+            d = hand.to_dict()
+            self.assertNotIn("pointer", d, f"Unexpected pointer in {gesture} dict")
 
 
 if __name__ == "__main__":
