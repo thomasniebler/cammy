@@ -43,6 +43,8 @@ class ActionType(str, Enum):
     KEY_PRESS = "key_press"
     WEBHOOK = "webhook"
     SHELL = "shell"
+    MOUSE_MOVE = "mouse_move"
+    MOUSE_CLICK = "mouse_click"
     CUSTOM = "custom"
 
 
@@ -95,12 +97,18 @@ class DetectedHand:
     landmarks: Optional[List[List[float]]] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        result: Dict[str, Any] = {
             "id": self.id,
             "type": self.gesture.value if self.gesture else GestureType.UNKNOWN.value,
             "confidence": round(self.gesture_confidence, 2),
             "hand": self.hand_type.value,
         }
+        if self.gesture == GestureType.POINTING and self.landmarks and len(self.landmarks) > 8:
+            result["pointer"] = {
+                "x": round(self.landmarks[8][0], 4),
+                "y": round(self.landmarks[8][1], 4),
+            }
+        return result
 
 
 @dataclass

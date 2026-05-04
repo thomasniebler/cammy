@@ -17,7 +17,7 @@ import time
 import threading
 import json
 from pathlib import Path
-from typing import Optional, Dict, Any, Callable, List
+from typing import Optional, Dict, Any, Callable, List, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -404,6 +404,99 @@ class ShellAction:
             return ActionResult.FAILURE
 
 
+class MouseControlAction:
+    """Mouse cursor movement and click actions via finger pointer tracking.
+
+    Uses exponential moving average (EMA) smoothing to reduce jitter.
+    The X axis is mirrored so that moving the finger right moves the cursor
+    right, matching the typical mirrored camera preview.
+    """
+
+    def __init__(self, smoothing: float = 0.2):
+        """Initialize mouse control action.
+
+        Args:
+            smoothing: EMA alpha (0–1). Lower = smoother but laggier.
+        """
+        self._smoothing = smoothing
+        self._smooth_x: Optional[float] = None
+        self._smooth_y: Optional[float] = None
+        self._pyautogui = None
+        self._screen_size: Optional[Tuple[int, int]] = None
+
+        if PYAUTOGUI_AVAILABLE:
+            import pyautogui
+
+            self._pyautogui = pyautogui
+            self._pyautogui.FAILSAFE = False
+            self._pyautogui.PAUSE = 0
+            logger.info("MouseControlAction initialized")
+        else:
+            logger.warning("pyautogui not available for mouse control")
+
+    def _get_screen_size(self) -> Tuple[int, int]:
+        if self._screen_size is None and self._pyautogui:
+            self._screen_size = self._pyautogui.size()
+        return self._screen_size or (1920, 1080)
+
+    def move(self, norm_x: float, norm_y: float) -> ActionResult:
+        """Move the cursor to a normalised position (0–1).
+
+        Args:
+            norm_x: Normalised X in camera frame (0 = left, 1 = right)
+            norm_y: Normalised Y in camera frame (0 = top,  1 = bottom)
+
+        Returns:
+            ActionResult
+        """
+        if not self._pyautogui:
+            return ActionResult.SKIP
+
+        # Mirror X so that right-in-camera → right-on-screen
+        mirrored_x = 1.0 - norm_x
+
+        # EMA smoothing
+        if self._smooth_x is None:
+            self._smooth_x = mirrored_x
+            self._smooth_y = norm_y
+        else:
+            self._smooth_x = self._smoothing * mirrored_x + (1 - self._smoothing) * self._smooth_x
+            self._smooth_y = self._smoothing * norm_y + (1 - self._smoothing) * self._smooth_y
+
+        screen_w, screen_h = self._get_screen_size()
+        screen_x = int(max(0.0, min(self._smooth_x, 1.0)) * screen_w)
+        screen_y = int(max(0.0, min(self._smooth_y, 1.0)) * screen_h)
+
+        try:
+            self._pyautogui.moveTo(screen_x, screen_y, duration=0)
+            return ActionResult.SUCCESS
+        except Exception as e:
+            logger.error(f"Mouse move failed: {e}")
+            return ActionResult.FAILURE
+
+    def click(self) -> ActionResult:
+        """Perform a left-click at the current cursor position.
+
+        Returns:
+            ActionResult
+        """
+        if not self._pyautogui:
+            return ActionResult.SKIP
+
+        try:
+            self._pyautogui.click()
+            logger.debug("Mouse click")
+            return ActionResult.SUCCESS
+        except Exception as e:
+            logger.error(f"Mouse click failed: {e}")
+            return ActionResult.FAILURE
+
+    def reset_smoothing(self) -> None:
+        """Reset EMA state so the next move starts without lag."""
+        self._smooth_x = None
+        self._smooth_y = None
+
+
 class ActionExecutor:
     """Main action executor with gesture mapping and debouncing."""
 
@@ -411,12 +504,14 @@ class ActionExecutor:
         self,
         mapper: Optional[ActionMapper] = None,
         cooldown_ms: int = 1000,
+        mouse_control_enabled: bool = True,
     ):
         """Initialize action executor.
 
         Args:
             mapper: Gesture to action mapper
             cooldown_ms: Default cooldown between triggers
+            mouse_control_enabled: Enable finger-pointer mouse control
         """
         self._mapper = mapper or ActionMapper()
         self._cooldown_ms = cooldown_ms
@@ -424,12 +519,14 @@ class ActionExecutor:
         self._key_press = KeyPressAction()
         self._webhook = WebhookAction()
         self._shell = ShellAction()
+        self._mouse_control = MouseControlAction()
 
         # Debounce tracking
         self._last_action_time: Dict[str, float] = {}
         self._lock = threading.Lock()
 
         self._enabled = True
+        self._mouse_enabled = mouse_control_enabled
 
         # Callback called after each successful action
         self._on_action_executed: Optional[Callable[[Dict[str, Any]], None]] = None
@@ -448,6 +545,10 @@ class ActionExecutor:
     ) -> List[Action]:
         """Execute actions based on detected hands.
 
+        POINTING gesture moves the mouse cursor (continuous, no cooldown).
+        OK_SIGN gesture performs a mouse click (with click_cooldown_ms cooldown).
+        All other gestures are dispatched through the normal gesture→action mapping.
+
         Args:
             hands: List of detected hands
 
@@ -455,15 +556,47 @@ class ActionExecutor:
             List of executed actions
         """
         if not self._enabled or not hands:
+            # Reset mouse smoothing when no hands are visible
+            if self._mouse_enabled:
+                self._mouse_control.reset_smoothing()
             return []
 
         executed = []
+
+        # Reset smoothing when no hand is pointing this frame
+        if self._mouse_enabled and not any(h.gesture == GestureType.POINTING for h in hands):
+            self._mouse_control.reset_smoothing()
 
         for hand in hands:
             gesture = hand.gesture
             if gesture == GestureType.UNKNOWN or gesture == GestureType.NONE:
                 continue
 
+            # ── Mouse pointer control ──────────────────────────────────────
+            if self._mouse_enabled and gesture == GestureType.POINTING:
+                if hand.landmarks and len(hand.landmarks) > 8:
+                    self._mouse_control.move(hand.landmarks[8][0], hand.landmarks[8][1])
+                # POINTING is reserved for cursor movement; skip regular actions
+                continue
+
+            if self._mouse_enabled and gesture == GestureType.OK_SIGN:
+                # OK_SIGN (pinch) = left click with debounce
+                _CLICK_COOLDOWN_MS = 800
+                if self._check_cooldown("mouse_click", _CLICK_COOLDOWN_MS):
+                    result = self._mouse_control.click()
+                    self._update_cooldown("mouse_click")
+                    if result != ActionResult.FAILURE:
+                        action = Action(
+                            action_type=ActionType.MOUSE_CLICK,
+                            action_name="mouse_click",
+                            payload={},
+                            timestamp=time.time(),
+                        )
+                        executed.append(action)
+                # OK_SIGN is reserved for click; skip regular actions
+                continue
+
+            # ── Regular gesture → action dispatch ─────────────────────────
             action_config = self._mapper.get_action(gesture)
             if not action_config:
                 continue
@@ -541,6 +674,17 @@ class ActionExecutor:
         """Disable action execution."""
         self._enabled = False
 
+    def enable_mouse_control(self) -> None:
+        """Enable finger-pointer mouse control."""
+        self._mouse_enabled = True
+        logger.info("Mouse control enabled")
+
+    def disable_mouse_control(self) -> None:
+        """Disable finger-pointer mouse control."""
+        self._mouse_enabled = False
+        self._mouse_control.reset_smoothing()
+        logger.info("Mouse control disabled")
+
     @property
     def mapper(self) -> ActionMapper:
         """Get the action mapper."""
@@ -551,11 +695,17 @@ class ActionExecutor:
         """Check if enabled."""
         return self._enabled
 
+    @property
+    def mouse_control_enabled(self) -> bool:
+        """Check if mouse control is enabled."""
+        return self._mouse_enabled
+
 
 def create_action_executor(
     mapping: Optional[Dict[GestureType, str]] = None,
     cooldown_ms: int = 1000,
     commands_manager: Optional[CommandsManager] = None,
+    mouse_control_enabled: bool = True,
 ) -> ActionExecutor:
     """Factory to create action executor.
 
@@ -563,9 +713,10 @@ def create_action_executor(
         mapping: Custom gesture to action mapping (ignored when commands_manager provided)
         cooldown_ms: Default cooldown
         commands_manager: Persistent command store
+        mouse_control_enabled: Enable finger-pointer mouse control
 
     Returns:
         ActionExecutor instance
     """
     mapper = ActionMapper(mapping, commands_manager=commands_manager)
-    return ActionExecutor(mapper=mapper, cooldown_ms=cooldown_ms)
+    return ActionExecutor(mapper=mapper, cooldown_ms=cooldown_ms, mouse_control_enabled=mouse_control_enabled)

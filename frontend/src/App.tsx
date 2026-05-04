@@ -13,6 +13,7 @@ interface DetectedHand {
   type: string
   confidence: number
   hand: string
+  pointer?: { x: number; y: number }
 }
 
 interface Identity {
@@ -484,6 +485,30 @@ function App() {
       ctx.font = '12px sans-serif'
       ctx.fillText(gestureText, 15, canvas.height - 15)
     }
+
+    // Draw red dot for pointing gesture (index fingertip position)
+    hands.forEach(hand => {
+      if (hand.type === 'pointing' && hand.pointer) {
+        // Mirror X to match the typical mirrored camera preview
+        const dotX = (1 - hand.pointer.x) * canvas.width
+        const dotY = hand.pointer.y * canvas.height
+
+        // Outer glow ring
+        ctx.beginPath()
+        ctx.arc(dotX, dotY, 14, 0, Math.PI * 2)
+        ctx.fillStyle = 'rgba(239, 68, 68, 0.25)'
+        ctx.fill()
+
+        // Solid red dot
+        ctx.beginPath()
+        ctx.arc(dotX, dotY, 8, 0, Math.PI * 2)
+        ctx.fillStyle = 'rgba(239, 68, 68, 0.9)'
+        ctx.fill()
+        ctx.strokeStyle = 'white'
+        ctx.lineWidth = 2
+        ctx.stroke()
+      }
+    })
   }, [faces, hands])
 
   useEffect(() => { drawDetections() }, [drawDetections])
