@@ -439,6 +439,12 @@ class MouseControlAction:
             self._screen_size = self._pyautogui.size()
         return self._screen_size or (1920, 1080)
 
+    def _apply_ema(self, new_value: float, smooth_value: Optional[float]) -> float:
+        """Apply one EMA step: alpha * new + (1-alpha) * old."""
+        if smooth_value is None:
+            return new_value
+        return self._smoothing * new_value + (1 - self._smoothing) * smooth_value
+
     def move(self, norm_x: float, norm_y: float) -> ActionResult:
         """Move the cursor to a normalised position (0–1).
 
@@ -456,12 +462,8 @@ class MouseControlAction:
         mirrored_x = 1.0 - norm_x
 
         # EMA smoothing
-        if self._smooth_x is None:
-            self._smooth_x = mirrored_x
-            self._smooth_y = norm_y
-        else:
-            self._smooth_x = self._smoothing * mirrored_x + (1 - self._smoothing) * self._smooth_x
-            self._smooth_y = self._smoothing * norm_y + (1 - self._smoothing) * self._smooth_y
+        self._smooth_x = self._apply_ema(mirrored_x, self._smooth_x)
+        self._smooth_y = self._apply_ema(norm_y, self._smooth_y)
 
         screen_w, screen_h = self._get_screen_size()
         screen_x = int(max(0.0, min(self._smooth_x, 1.0)) * screen_w)
@@ -499,6 +501,9 @@ class MouseControlAction:
 
 class ActionExecutor:
     """Main action executor with gesture mapping and debouncing."""
+
+    # Cooldown for the built-in mouse click (OK_SIGN gesture), in milliseconds.
+    MOUSE_CLICK_COOLDOWN_MS: int = 800
 
     def __init__(
         self,
@@ -581,8 +586,7 @@ class ActionExecutor:
 
             if self._mouse_enabled and gesture == GestureType.OK_SIGN:
                 # OK_SIGN (pinch) = left click with debounce
-                _CLICK_COOLDOWN_MS = 800
-                if self._check_cooldown("mouse_click", _CLICK_COOLDOWN_MS):
+                if self._check_cooldown("mouse_click", self.MOUSE_CLICK_COOLDOWN_MS):
                     result = self._mouse_control.click()
                     self._update_cooldown("mouse_click")
                     if result != ActionResult.FAILURE:

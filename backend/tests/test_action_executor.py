@@ -266,15 +266,16 @@ class TestMouseControlAction(unittest.TestCase):
         action._pyautogui = FakePyautogui()
         action._screen_size = (1920, 1080)
 
-        # First call – initialises EMA to the input
+        # First call – EMA initialises to the mirrored input (1-0.5 = 0.5)
         action.move(0.5, 0.5)
-        # Second call – EMA blends with new value
+        # Second call – EMA blends: smooth_x = alpha*(1-0.9) + (1-alpha)*prev
+        #   = 0.5*0.1 + 0.5*0.5 = 0.05 + 0.25 = 0.3
         action.move(0.9, 0.9)
 
         self.assertEqual(len(calls), 2)
-        # First call should mirror X: (1-0.5)*1920 = 960
+        # First call: (1-0.5)*1920 = 960
         self.assertEqual(calls[0][0], 960)
-        # Second call EMA: smooth_x = 0.5*(1-0.9) + 0.5*(1-0.5) = 0.5*0.1 + 0.5*0.5 = 0.3
+        # Second call: smooth_x=0.3 → int(0.3*1920) = 576
         expected_x = int(0.3 * 1920)
         self.assertEqual(calls[1][0], expected_x)
 
