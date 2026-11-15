@@ -489,8 +489,9 @@ function App() {
     // Draw red dot for pointing gesture (index fingertip position)
     hands.forEach(hand => {
       if (hand.type === 'pointing' && hand.pointer) {
-        // Mirror X to match the typical mirrored camera preview
-        const dotX = (1 - hand.pointer.x) * canvas.width
+        // The preview stream is not mirrored, so draw at the raw fingertip X
+        // (only the OS cursor mapping is mirrored, in the backend)
+        const dotX = hand.pointer.x * canvas.width
         const dotY = hand.pointer.y * canvas.height
 
         // Outer glow ring
