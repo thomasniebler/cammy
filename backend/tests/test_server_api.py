@@ -122,6 +122,52 @@ class TestSetDevice(unittest.TestCase):
         self.assertEqual(state["idx"], 0)
 
 
+class TestReaderCancelDuringOpen(unittest.TestCase):
+    def test_stop_during_slow_open_prevents_capture(self):
+        import threading
+
+        import cammy.camera_capture as cc
+
+        open_started = threading.Event()
+        allow_open = threading.Event()
+        reads = []
+        released = []
+
+        class SlowCap:
+            def __init__(self, idx):
+                open_started.set()
+                allow_open.wait(5)  # simulate a camera that takes long to open
+
+            def isOpened(self):
+                return True
+
+            def set(self, *a):
+                pass
+
+            def read(self):
+                reads.append(1)
+                return False, None
+
+            def release(self):
+                released.append(1)
+
+        orig = cc.cv2.VideoCapture
+        cc.cv2.VideoCapture = SlowCap
+        self.addCleanup(setattr, cc.cv2, "VideoCapture", orig)
+
+        reader = cc.CameraReader(device_index=7, target_fps=30)
+        reader.start()
+        self.assertTrue(open_started.wait(2))
+        reader.stop()          # rollback gives up while the open is still pending
+        allow_open.set()       # ...then the open finally completes
+        reader.join(timeout=3)
+
+        self.assertFalse(reader.is_alive(), "reader thread must exit")
+        self.assertFalse(reader.is_running())
+        self.assertEqual(reads, [], "cancelled reader must not capture")
+        self.assertEqual(released, [1], "device must be released")
+
+
 class TestSetDeviceConcurrency(unittest.TestCase):
     def test_overlapping_switches_leave_exactly_one_reader(self):
         import threading

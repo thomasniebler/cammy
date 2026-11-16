@@ -109,6 +109,8 @@ class CameraReader(threading.Thread):
         self._metrics = metrics
         self._cap: Optional[cv2.VideoCapture] = None
         self._running = False
+        # Persistent cancel signal: survives a slow VideoCapture() open, unlike _running
+        self._stop_event = threading.Event()
         self._frame_time = 1.0 / target_fps
         self._latest_frame: Optional[CameraFrame] = None
         self._latest_frame_lock = threading.Lock()
@@ -117,8 +119,15 @@ class CameraReader(threading.Thread):
         """Main capture loop running in thread."""
         self._cap = cv2.VideoCapture(self._device_index)
 
+        if self._stop_event.is_set():
+            # Cancelled while the (possibly slow) open was in progress
+            self._cap.release()
+            logger.info(f"Camera {self._device_index} open cancelled")
+            return
+
         if not self._cap.isOpened():
             logger.error(f"Cannot open camera {self._device_index}")
+            self._cap.release()
             return
 
         # Configure camera
@@ -129,7 +138,7 @@ class CameraReader(threading.Thread):
         self._running = True
         logger.info(f"Camera reader started for device {self._device_index}")
 
-        while self._running:
+        while self._running and not self._stop_event.is_set():
             with LatencyTracker(self._metrics or SystemMetrics(), "capture"):
                 ret, frame = self._cap.read()
 
@@ -164,12 +173,13 @@ class CameraReader(threading.Thread):
         logger.info("Camera reader stopped")
 
     def stop(self) -> None:
-        """Stop the camera reader."""
+        """Stop the camera reader (also cancels a pending open)."""
+        self._stop_event.set()
         self._running = False
 
     def is_running(self) -> bool:
         """Check if reader is running."""
-        return self._running
+        return self._running and not self._stop_event.is_set()
 
     def peek_latest_frame(self) -> Optional[CameraFrame]:
         """Return the most recent frame without consuming it from the queue."""
