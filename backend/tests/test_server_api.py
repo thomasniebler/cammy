@@ -168,6 +168,53 @@ class TestReaderCancelDuringOpen(unittest.TestCase):
         self.assertEqual(released, [1], "device must be released")
 
 
+class TestReaderAccessDuringSwitch(unittest.TestCase):
+    """Accessors must read self._reader once: a switch can clear it between reads."""
+
+    def _capture(self):
+        class Reader:
+            def peek_latest_frame(self):
+                return "frame"
+
+            def is_running(self):
+                return True
+
+        class Flaky(CameraCapture):
+            """_reader yields the reader on first access, then None (as stop() would)."""
+
+            def __init__(self):
+                super().__init__()
+                self._accesses = 0
+
+            @property
+            def _reader(self):
+                self._accesses += 1
+                return Reader() if self._accesses == 1 else None
+
+            @_reader.setter
+            def _reader(self, value):
+                pass
+
+        return Flaky()
+
+    def test_get_latest_frame_survives_concurrent_clear(self):
+        self.assertEqual(self._capture().get_latest_frame(), "frame")
+
+    def test_is_running_survives_concurrent_clear(self):
+        self.assertTrue(self._capture().is_running())
+
+    def test_get_frame_survives_queue_cleared(self):
+        cap = CameraCapture()
+
+        class Q:
+            def get(self, block=True, timeout=1.0):
+                cap._frame_queue = None  # switch replaces the queue mid-call
+                return "f"
+
+        cap._frame_queue = Q()
+        self.assertEqual(cap.get_frame(), "f")
+
+
 class TestSetDeviceConcurrency(unittest.TestCase):
     def test_overlapping_switches_leave_exactly_one_reader(self):
         import threading

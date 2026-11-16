@@ -260,11 +260,13 @@ class CameraCapture:
         Returns:
             CameraFrame if available, None otherwise
         """
-        if self._frame_queue is None:
+        # Snapshot: a concurrent camera switch may replace the queue
+        queue = self._frame_queue
+        if queue is None:
             return None
 
         try:
-            return self._frame_queue.get(block=block, timeout=timeout)
+            return queue.get(block=block, timeout=timeout)
         except:
             return None
 
@@ -273,9 +275,10 @@ class CameraCapture:
 
         Safe to call from the MJPEG stream — does not starve face/hand pipelines.
         """
-        if self._reader is None:
+        reader = self._reader  # snapshot: a concurrent switch may clear it
+        if reader is None:
             return None
-        return self._reader.peek_latest_frame()
+        return reader.peek_latest_frame()
 
     def get_available_cameras(self) -> List[CameraInfo]:
         """Get list of available cameras."""
@@ -314,7 +317,8 @@ class CameraCapture:
 
     def is_running(self) -> bool:
         """Check if capture is running."""
-        return self._reader is not None and self._reader.is_running()
+        reader = self._reader  # snapshot: a concurrent switch may clear it
+        return reader is not None and reader.is_running()
 
     @property
     def metrics(self) -> SystemMetrics:
