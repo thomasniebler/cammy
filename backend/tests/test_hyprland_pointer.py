@@ -103,6 +103,30 @@ class TestMonitorSelection(unittest.TestCase):
         self.assertEqual(make(run=_run_ok(unfocused)).monitor, "eDP-1")
 
 
+class TestMonitorRotation(unittest.TestCase):
+    def _size(self, transform, scale=1.0):
+        mon = [{"name": "DP-1", "x": 0, "y": 0, "width": 1920, "height": 1080,
+                "scale": scale, "focused": True, "transform": transform}]
+        return make(run=_run_ok(mon)).size
+
+    def test_unrotated_and_180_keep_dimensions(self):
+        self.assertEqual(self._size(0), (1920, 1080))
+        self.assertEqual(self._size(2), (1920, 1080))
+        self.assertEqual(self._size(4), (1920, 1080))  # flipped
+        self.assertEqual(self._size(6), (1920, 1080))  # flipped + 180
+
+    def test_90_and_270_swap_dimensions(self):
+        for t in (1, 3, 5, 7):
+            self.assertEqual(self._size(t), (1080, 1920), t)
+
+    def test_rotation_applies_before_scale(self):
+        self.assertEqual(self._size(1, scale=2.0), (540, 960))
+
+    def test_missing_transform_defaults_to_normal(self):
+        # MONITORS fixtures carry no "transform" key
+        self.assertEqual(make(extra_env={"CAMMY_MONITOR": "eDP-1"}).size, (1920, 1200))
+
+
 class TestMoveAndClick(unittest.TestCase):
     def test_move_to_offsets_by_origin_and_sends_command(self):
         p = make()

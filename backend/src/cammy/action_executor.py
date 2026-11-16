@@ -460,7 +460,12 @@ class HyprlandPointer:
         scale = chosen.get("scale", 1.0) or 1.0
         self.monitor = chosen["name"]
         self.origin = (int(chosen["x"]), int(chosen["y"]))
-        self.size = (int(chosen["width"] / scale), int(chosen["height"] / scale))
+        width, height = chosen["width"], chosen["height"]
+        # Hyprland reports the untransformed pixel size; for 90/270 degree
+        # rotations (transform 1, 3 and the flipped 5, 7) logical width/height swap.
+        if int(chosen.get("transform", 0) or 0) % 2 == 1:
+            width, height = height, width
+        self.size = (int(width / scale), int(height / scale))
 
     def _dispatch(self, command: str) -> bool:
         import socket
