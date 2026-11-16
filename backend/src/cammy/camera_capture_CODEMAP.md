@@ -25,6 +25,7 @@ src/cammy/camera_capture.py
 | Function | Description | Returns |
 |----------|-------------|--------|
 | `get_available_cameras()` | Discover available camera devices | `List[CameraInfo]` |
+| `list_camera_devices()` | List capture-capable cameras (Linux: reads `/sys/class/video4linux`, no device opened; falls back to `get_available_cameras()`) | `List[CameraInfo]` |
 | `create_camera_capture(device_index, target_fps)` | Factory to create CameraCapture | `CameraCapture` |
 
 ### Classes
@@ -33,6 +34,11 @@ src/cammy/camera_capture.py
 |-------|-------------|
 | `CameraCapture` | Main interface for camera capture |
 | `CameraReader` | Thread-based frame reader |
+
+`CameraCapture.set_device(index)` stops capture, switches the device and restarts; if the new camera does not open within 3 s it reverts to the previous one and returns `False`. `CameraCapture.device_index` is the current device.
+
+| Class (cont.) | Description |
+|-------|-------------|
 | `CameraInfo` | Camera device information |
 | `CameraFrame` | Wrapped frame with metadata |
 
@@ -111,4 +117,4 @@ capture.start()
 
 - When modifying frame processing, add preprocessing to CameraCapture or create a separate preprocessor module
 - To add camera settings (brightness, contrast), add to CameraConfig and apply in CameraReader.run()
-- For camera switching, implement in CameraCapture with proper thread cleanup
+- Camera switching is implemented by `CameraCapture.set_device()` (exposed as `POST /api/camera`)

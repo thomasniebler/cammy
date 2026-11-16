@@ -97,7 +97,7 @@ GestureClassifier
 
 - No MediaPipe: Returns empty hand list
 - Gesture init failure: Falls back to rule-based
-- Low confidence: Filters out with threshold
+- Low confidence: Filters out with threshold. POINTING/OK_SIGN (mouse gestures, classifier confidence 0.75/0.70) use a lower floor, `MOUSE_GESTURE_MIN_CONFIDENCE` (0.65), so they pass the default 0.80 threshold
 
 ## Metrics Tracked
 

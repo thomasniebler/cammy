@@ -23,7 +23,7 @@ import queue
 import uuid
 
 from .common.logging import setup_logger
-from .common.types import PipelineResult, DetectedFace, DetectedHand, Action
+from .common.types import is_valid_identity_name, PipelineResult, DetectedFace, DetectedHand, Action
 from .common.commands import CommandDef, CommandsManager
 
 
@@ -405,8 +405,11 @@ class RestAPI:
             if not self._face_pipeline:
                 raise HTTPException(status_code=500, detail="Face pipeline not set")
             name = identity.name.strip()
-            if not name:
-                raise HTTPException(status_code=400, detail="Name is required")
+            if not is_valid_identity_name(name):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Invalid name: use letters, digits, space, _ . - (max 64, start with a letter or digit)",
+                )
             frame = self._camera.get_latest_frame() if self._camera else None
             if frame is None:
                 raise HTTPException(status_code=503, detail="No camera frame available")
@@ -451,6 +454,8 @@ class RestAPI:
 
         @app.delete("/api/identities/{name}")
         async def delete_identity(name: str):
+            if not is_valid_identity_name(name):
+                raise HTTPException(status_code=400, detail="Invalid name")
             if self._face_pipeline:
                 self._face_pipeline.remove_identity(name)
                 return {"status": "ok"}

@@ -22,6 +22,24 @@ from cammy.action_executor import (
 )
 from cammy.common import GestureType, DetectedHand
 from cammy.common.types import ActionType
+import cammy.action_executor as _ae
+
+
+class _NoHyprland:
+    """Stand-in so tests never move the developer's real cursor."""
+
+    available = False
+
+
+_orig_hypr = _ae.HyprlandPointer
+
+
+def setUpModule():
+    _ae.HyprlandPointer = _NoHyprland
+
+
+def tearDownModule():
+    _ae.HyprlandPointer = _orig_hypr
 
 
 class TestActionMapper(unittest.TestCase):
@@ -220,6 +238,7 @@ class TestMouseControlAction(unittest.TestCase):
         """Test move returns SKIP when pyautogui is unavailable."""
         action = MouseControlAction()
         action._pyautogui = None  # Force unavailable
+        action._hypr = None
 
         result = action.move(0.5, 0.5)
 
@@ -229,6 +248,7 @@ class TestMouseControlAction(unittest.TestCase):
         """Test click returns SKIP when pyautogui is unavailable."""
         action = MouseControlAction()
         action._pyautogui = None  # Force unavailable
+        action._hypr = None
 
         result = action.click()
 
@@ -249,6 +269,7 @@ class TestMouseControlAction(unittest.TestCase):
         """Test EMA smoothing is applied after the first move call."""
         action = MouseControlAction(smoothing=0.5)
         action._pyautogui = None  # No actual mouse movement
+        action._hypr = None
 
         # Inject a dummy pyautogui to capture calls
         calls = []
@@ -410,3 +431,30 @@ class TestActionExecutorMouseControl(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestHyprlandBackend(unittest.TestCase):
+    """MouseControlAction routes through the Hyprland backend when present."""
+
+    def test_move_and_click_use_hyprland(self):
+        calls = []
+
+        class FakeHypr:
+            size = (1000, 500)
+
+            def move_to(self, x, y):
+                calls.append(("move", x, y))
+                return True
+
+            def click(self):
+                calls.append(("click",))
+                return True
+
+        action = MouseControlAction(smoothing=1.0)
+        action._pyautogui = None
+        action._hypr = FakeHypr()
+
+        # Camera x=0.25 mirrors to 0.75 -> 750; y=0.5 -> 250
+        self.assertEqual(action.move(0.25, 0.5), ActionResult.SUCCESS)
+        self.assertEqual(action.click(), ActionResult.SUCCESS)
+        self.assertEqual(calls, [("move", 750, 250), ("click",)])

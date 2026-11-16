@@ -53,6 +53,11 @@ _HAND_MODEL_URL = (
 )
 
 
+# Gestures reserved for mouse control and their minimum classifier confidence
+MOUSE_GESTURES = (GestureType.POINTING, GestureType.OK_SIGN)
+MOUSE_GESTURE_MIN_CONFIDENCE = 0.65
+
+
 class HandDetector:
     """Hand landmark detector using MediaPipe HandLandmarker (Tasks API)."""
 
@@ -374,7 +379,13 @@ class HandPipeline:
             # Store combined confidence for informational purposes; filter by gesture confidence only
             combined_conf = gesture_conf * confidence
 
-            if gesture_conf >= self._min_confidence:
+            # Mouse-control gestures score below the default threshold (0.75/0.70
+            # vs 0.80), so they get their own floor; otherwise they never fire.
+            threshold = self._min_confidence
+            if gesture in MOUSE_GESTURES:
+                threshold = min(threshold, MOUSE_GESTURE_MIN_CONFIDENCE)
+
+            if gesture_conf >= threshold:
                 hand = DetectedHand(
                     gesture=gesture,
                     gesture_confidence=combined_conf,

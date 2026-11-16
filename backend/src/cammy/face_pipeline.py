@@ -27,6 +27,7 @@ import numpy as np
 from .common.logging import setup_logger
 from .common.queue import ThreadSafeQueue
 from .common.metrics import SystemMetrics, LatencyTracker
+from .common.types import is_valid_identity_name
 from .common.types import DetectedFace, BoundingBox
 
 
@@ -110,6 +111,9 @@ class IdentityStore:
         Returns:
             True if successful
         """
+        if not is_valid_identity_name(name):
+            logger.error(f"Rejected invalid identity name: {name!r}")
+            return False
         with self._lock:
             try:
                 identity_file = self._storage_dir / f"{name}.json"
@@ -131,6 +135,8 @@ class IdentityStore:
         Returns:
             True if successful
         """
+        if not is_valid_identity_name(name):
+            return False
         with self._lock:
             identity_file = self._storage_dir / f"{name}.json"
             try:

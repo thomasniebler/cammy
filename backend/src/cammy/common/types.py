@@ -3,6 +3,7 @@
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any
 from enum import Enum
+import re
 import uuid
 
 
@@ -191,3 +192,11 @@ GESTURE_ACTION_MAPPING: Dict[GestureType, ActionType] = {
     GestureType.THUMBS_DOWN: ActionType.VOLUME_DOWN,
     GestureType.PEACE: ActionType.MEDIA_NEXT,
 }
+
+
+_IDENTITY_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _.-]{0,63}$")
+
+
+def is_valid_identity_name(name: str) -> bool:
+    """Identity names become filenames: no separators, no leading dot, no '..'."""
+    return bool(_IDENTITY_NAME_RE.match(name)) and ".." not in name

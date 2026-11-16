@@ -404,6 +404,80 @@ class ShellAction:
             return ActionResult.FAILURE
 
 
+class HyprlandPointer:
+    """Cursor control on Hyprland (Wayland) without X11.
+
+    Moves via the Hyprland IPC socket (``dispatch movecursor X Y``, absolute
+    layout coordinates) and clicks via ``ydotool`` (needs ydotoold running).
+    The camera is mapped onto one monitor: ``$CAMMY_MONITOR`` if set, else the
+    monitor that is focused when the backend starts.
+    """
+
+    def __init__(self) -> None:
+        import os
+        import shutil
+
+        self.available = False
+        sig = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE")
+        runtime = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+        self._sock_path = f"{runtime}/hypr/{sig}/.socket.sock" if sig else None
+        self._ydotool = shutil.which("ydotool")
+        self._env = dict(os.environ)
+        self._env.setdefault("YDOTOOL_SOCKET", f"{runtime}/.ydotool_socket")
+        self.origin: Tuple[int, int] = (0, 0)
+        self.size: Tuple[int, int] = (1920, 1080)
+
+        if not (self._sock_path and os.path.exists(self._sock_path)):
+            return
+        try:
+            self._load_monitor(os.environ.get("CAMMY_MONITOR"))
+        except Exception as e:
+            logger.warning(f"Hyprland monitor lookup failed: {e}")
+            return
+        self.available = True
+        if not (self._ydotool and os.path.exists(self._env["YDOTOOL_SOCKET"])):
+            logger.warning("ydotool/ydotoold not available: pointer will move but not click")
+            self._ydotool = None
+        logger.info(f"Hyprland pointer control on {self.monitor} {self.size} at {self.origin}")
+
+    def _load_monitor(self, wanted: Optional[str]) -> None:
+        import subprocess
+
+        out = subprocess.run(
+            ["hyprctl", "monitors", "-j"], capture_output=True, text=True, timeout=3, check=True
+        ).stdout
+        monitors = json.loads(out)
+        chosen = next((m for m in monitors if m["name"] == wanted), None) if wanted else None
+        chosen = chosen or next((m for m in monitors if m.get("focused")), monitors[0])
+        scale = chosen.get("scale", 1.0) or 1.0
+        self.monitor = chosen["name"]
+        self.origin = (int(chosen["x"]), int(chosen["y"]))
+        self.size = (int(chosen["width"] / scale), int(chosen["height"] / scale))
+
+    def _dispatch(self, command: str) -> bool:
+        import socket
+
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(1.0)
+            sock.connect(self._sock_path)
+            sock.sendall(command.encode())
+            return sock.recv(256).decode().strip() == "ok"
+
+    def move_to(self, x: int, y: int) -> bool:
+        return self._dispatch(f"dispatch movecursor {self.origin[0] + x} {self.origin[1] + y}")
+
+    def click(self) -> bool:
+        if not self._ydotool:
+            return False
+        import subprocess
+
+        # 0xC0 = left button down + up
+        r = subprocess.run(
+            [self._ydotool, "click", "0xC0"], env=self._env, capture_output=True, timeout=2
+        )
+        return r.returncode == 0
+
+
 class MouseControlAction:
     """Mouse cursor movement and click actions via finger pointer tracking.
 
@@ -423,6 +497,13 @@ class MouseControlAction:
         self._smooth_y: Optional[float] = None
         self._pyautogui = None
         self._screen_size: Optional[Tuple[int, int]] = None
+        self._hypr: Optional[HyprlandPointer] = None
+
+        if not PYAUTOGUI_AVAILABLE:
+            pointer = HyprlandPointer()
+            if pointer.available:
+                self._hypr = pointer
+                logger.info("MouseControlAction using Hyprland backend")
 
         if PYAUTOGUI_AVAILABLE:
             import pyautogui
@@ -435,6 +516,8 @@ class MouseControlAction:
             logger.warning("pyautogui not available for mouse control")
 
     def _get_screen_size(self) -> Tuple[int, int]:
+        if self._hypr:
+            return self._hypr.size
         if self._screen_size is None and self._pyautogui:
             self._screen_size = self._pyautogui.size()
         return self._screen_size or (1920, 1080)
@@ -455,7 +538,7 @@ class MouseControlAction:
         Returns:
             ActionResult
         """
-        if not self._pyautogui:
+        if not self._pyautogui and not self._hypr:
             return ActionResult.SKIP
 
         # Mirror X so that right-in-camera → right-on-screen
@@ -470,6 +553,9 @@ class MouseControlAction:
         screen_y = int(max(0.0, min(self._smooth_y, 1.0)) * screen_h)
 
         try:
+            if self._hypr:
+                ok = self._hypr.move_to(screen_x, screen_y)
+                return ActionResult.SUCCESS if ok else ActionResult.FAILURE
             self._pyautogui.moveTo(screen_x, screen_y, duration=0)
             return ActionResult.SUCCESS
         except Exception as e:
@@ -482,10 +568,12 @@ class MouseControlAction:
         Returns:
             ActionResult
         """
-        if not self._pyautogui:
+        if not self._pyautogui and not self._hypr:
             return ActionResult.SKIP
 
         try:
+            if self._hypr:
+                return ActionResult.SUCCESS if self._hypr.click() else ActionResult.FAILURE
             self._pyautogui.click()
             logger.debug("Mouse click")
             return ActionResult.SUCCESS
