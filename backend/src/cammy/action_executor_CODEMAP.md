@@ -72,7 +72,7 @@ src/cammy/action_executor.py
 
 ## Mouse Control
 
-Backends: `pyautogui` on X11, or `HyprlandPointer` on Hyprland/Wayland (moves via the Hyprland IPC socket `dispatch movecursor`, clicks via `ydotool`; needs `ydotoold`). The camera maps onto one monitor: `$CAMMY_MONITOR` or the monitor focused at startup.
+Backends (in order of preference): `HyprlandPointer` on Hyprland/Wayland, else `pyautogui` on X11. Hyprland wins even if pyautogui imports (XWayland only reaches X11 windows). `HyprlandPointer` (moves via the Hyprland IPC socket `dispatch movecursor`, clicks via `ydotool`; needs `ydotoold`). The camera maps onto one monitor: `$CAMMY_MONITOR` or the monitor focused at startup.
 
 `MouseControlAction` uses an **Exponential Moving Average (EMA)** filter to smooth the raw
 MediaPipe landmark positions before mapping them to screen coordinates.

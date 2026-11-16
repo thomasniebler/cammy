@@ -499,20 +499,21 @@ class MouseControlAction:
         self._screen_size: Optional[Tuple[int, int]] = None
         self._hypr: Optional[HyprlandPointer] = None
 
-        if not PYAUTOGUI_AVAILABLE:
-            pointer = HyprlandPointer()
-            if pointer.available:
-                self._hypr = pointer
-                logger.info("MouseControlAction using Hyprland backend")
+        # Prefer the native compositor backend: pyautogui may import fine under
+        # XWayland yet only reach X11 windows.
+        pointer = HyprlandPointer()
+        if pointer.available:
+            self._hypr = pointer
+            logger.info("MouseControlAction using Hyprland backend")
 
-        if PYAUTOGUI_AVAILABLE:
+        if self._hypr is None and PYAUTOGUI_AVAILABLE:
             import pyautogui
 
             self._pyautogui = pyautogui
             self._pyautogui.FAILSAFE = False
             self._pyautogui.PAUSE = 0
             logger.info("MouseControlAction initialized")
-        else:
+        elif self._hypr is None:
             logger.warning("pyautogui not available for mouse control")
 
     def _get_screen_size(self) -> Tuple[int, int]:
