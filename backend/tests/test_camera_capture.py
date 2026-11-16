@@ -134,3 +134,25 @@ class TestCameraReader(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestListCameraDevices(unittest.TestCase):
+    """Tests for list_camera_devices (sysfs-based, non-intrusive)."""
+
+    def test_returns_capture_nodes_with_names(self):
+        from cammy.camera_capture import list_camera_devices
+
+        cams = list_camera_devices()
+        for c in cams:
+            self.assertIsInstance(c.index, int)
+            self.assertTrue(c.name)
+
+
+class TestDetectedHandFingertip(unittest.TestCase):
+    def test_fingertip_present_for_all_gestures(self):
+        from cammy.common.types import DetectedHand, GestureType
+
+        lm = [[0.1 * i, 0.05 * i, 0.0] for i in range(21)]
+        for g in (GestureType.POINTING, GestureType.FIST):
+            d = DetectedHand(gesture=g, landmarks=lm).to_dict()
+            self.assertIn("fingertip", d)

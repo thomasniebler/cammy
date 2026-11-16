@@ -30,10 +30,12 @@ dependencies = [
 dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
+    "httpx>=0.25.0",
     "ruff>=0.4.0",
 ]
 face = [
     "deepface>=0.0.81",
+    "tf-keras>=2.16",
 ]
 hand = [
     "mediapipe>=0.10.0",

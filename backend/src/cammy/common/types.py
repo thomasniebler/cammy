@@ -3,6 +3,7 @@
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any
 from enum import Enum
+import re
 import uuid
 
 
@@ -43,6 +44,8 @@ class ActionType(str, Enum):
     KEY_PRESS = "key_press"
     WEBHOOK = "webhook"
     SHELL = "shell"
+    MOUSE_MOVE = "mouse_move"
+    MOUSE_CLICK = "mouse_click"
     CUSTOM = "custom"
 
 
@@ -95,12 +98,35 @@ class DetectedHand:
     landmarks: Optional[List[List[float]]] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        result: Dict[str, Any] = {
             "id": self.id,
             "type": self.gesture.value if self.gesture else GestureType.UNKNOWN.value,
             "confidence": round(self.gesture_confidence, 2),
             "hand": self.hand_type.value,
         }
+        if self.landmarks:
+            xs = [lm[0] for lm in self.landmarks]
+            ys = [lm[1] for lm in self.landmarks]
+            pad = 0.02
+            x0, y0 = max(0.0, min(xs) - pad), max(0.0, min(ys) - pad)
+            x1, y1 = min(1.0, max(xs) + pad), min(1.0, max(ys) + pad)
+            # Normalised (0-1) bounding box around the whole hand
+            result["bbox"] = {
+                "x": round(x0, 4),
+                "y": round(y0, 4),
+                "width": round(x1 - x0, 4),
+                "height": round(y1 - y0, 4),
+            }
+        if self.landmarks and len(self.landmarks) > 8:
+            tip = {
+                "x": round(self.landmarks[8][0], 4),
+                "y": round(self.landmarks[8][1], 4),
+            }
+            # Index fingertip for every hand (used by the UI debug overlay)
+            result["fingertip"] = tip
+            if self.gesture == GestureType.POINTING:
+                result["pointer"] = dict(tip)
+        return result
 
 
 @dataclass
@@ -166,3 +192,11 @@ GESTURE_ACTION_MAPPING: Dict[GestureType, ActionType] = {
     GestureType.THUMBS_DOWN: ActionType.VOLUME_DOWN,
     GestureType.PEACE: ActionType.MEDIA_NEXT,
 }
+
+
+_IDENTITY_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _.-]{0,63}$")
+
+
+def is_valid_identity_name(name: str) -> bool:
+    """Identity names become filenames: no separators, no leading dot, no '..'."""
+    return bool(_IDENTITY_NAME_RE.match(name)) and ".." not in name

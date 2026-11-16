@@ -65,10 +65,22 @@ tasks:
 
   # Testing
   test:
-    desc: Run all tests
+    desc: Run all tests (backend and frontend)
+    deps:
+      - test-backend
+      - test-frontend
+
+  test-backend:
+    desc: Run backend tests
     dir: backend
     cmds:
       - uv run pytest tests/ -v
+
+  test-frontend:
+    desc: Run frontend tests (vitest; run install-frontend first)
+    dir: frontend
+    cmds:
+      - npm test
 
   test-coverage:
     desc: Run tests with coverage

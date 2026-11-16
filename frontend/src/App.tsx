@@ -13,6 +13,9 @@ interface DetectedHand {
   type: string
   confidence: number
   hand: string
+  pointer?: { x: number; y: number }
+  fingertip?: { x: number; y: number }
+  bbox?: { x: number; y: number; width: number; height: number } // normalised 0-1
 }
 
 interface Identity {
@@ -302,6 +305,15 @@ function App() {
   const [gestureMappings, setGestureMappings] = useState<GestureMapping[]>([])
   const [actionsEnabled, setActionsEnabled] = useState(true)
   const [lastAction, setLastAction] = useState<LastAction | null>(null)
+  const [cameras, setCameras] = useState<{ index: number; name: string }[]>([])
+  const [currentCamera, setCurrentCamera] = useState<number | null>(null)
+  const [cameraError, setCameraError] = useState<string | null>(null)
+  const [streamKey, setStreamKey] = useState(0)
+  const [frameSize, setFrameSize] = useState({ width: 640, height: 480 })
+  const streamImgRef = useRef<HTMLImageElement>(null)
+  const [newIdentity, setNewIdentity] = useState('')
+  const [identityMsg, setIdentityMsg] = useState<{ ok: boolean; text: string } | null>(null)
+  const [enrolling, setEnrolling] = useState(false)
 
   // Command editor state
   const [editingCmd, setEditingCmd] = useState<Command | null>(null)
@@ -342,7 +354,79 @@ function App() {
     fetchIdentities()
     fetchCommands()
     fetchGestureMappings()
+    fetchCameras()
   }, [])
+
+  // Track the real frame size of the MJPEG stream so overlay coordinates
+  // (backend sends pixels of the source frame) line up with the picture.
+  useEffect(() => {
+    const t = setInterval(() => {
+      const img = streamImgRef.current
+      if (img && img.naturalWidth > 0) {
+        setFrameSize(prev =>
+          prev.width === img.naturalWidth && prev.height === img.naturalHeight
+            ? prev
+            : { width: img.naturalWidth, height: img.naturalHeight })
+      }
+    }, 500)
+    return () => clearInterval(t)
+  }, [])
+
+  // ── Camera selection ────────────────────────────────────────────────────────
+  async function fetchCameras() {
+    try {
+      const res = await fetch('/api/cameras')
+      const data = await res.json()
+      setCameras(data.cameras || [])
+      setCurrentCamera(data.current ?? null)
+    } catch { /* API not available */ }
+  }
+
+  async function handleSelectCamera(index: number) {
+    setCameraError(null)
+    try {
+      const res = await fetch('/api/camera', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ device_index: index }),
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        setCameraError(err.detail || 'Could not switch camera')
+      }
+      await fetchCameras()
+      setStreamKey(k => k + 1) // reconnect MJPEG stream
+    } catch {
+      setCameraError('API not available')
+    }
+  }
+
+  // ── Identity enrollment ─────────────────────────────────────────────────────
+  async function handleEnrollIdentity() {
+    const name = newIdentity.trim()
+    if (!name) return
+    setEnrolling(true)
+    setIdentityMsg(null)
+    try {
+      const res = await fetch('/api/identities', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (res.ok) {
+        setIdentityMsg({ ok: true, text: `Enrolled "${name}"` })
+        setNewIdentity('')
+        await fetchIdentities()
+      } else {
+        setIdentityMsg({ ok: false, text: data.detail || 'Enrollment failed' })
+      }
+    } catch {
+      setIdentityMsg({ ok: false, text: 'API not available' })
+    } finally {
+      setEnrolling(false)
+    }
+  }
 
   async function fetchIdentities() {
     try {
@@ -390,7 +474,7 @@ function App() {
   // ── Identities ──────────────────────────────────────────────────────────────
   async function handleDeleteIdentity(name: string) {
     try {
-      await fetch(`/api/identities/${name}`, { method: 'DELETE' })
+      await fetch(`/api/identities/${encodeURIComponent(name)}`, { method: 'DELETE' })
       setIdentities(prev => prev.filter(i => i.name !== name))
     } catch { /* API not available */ }
   }
@@ -461,8 +545,8 @@ function App() {
     if (!canvas) return
     const ctx = canvas.getContext('2d')
     if (!ctx) return
-    canvas.width = 640
-    canvas.height = 480
+    canvas.width = frameSize.width
+    canvas.height = frameSize.height
     ctx.clearRect(0, 0, canvas.width, canvas.height)
 
     faces.forEach(face => {
@@ -472,8 +556,23 @@ function App() {
       ctx.lineWidth = 2
       ctx.strokeRect(x, y, width, height)
       ctx.fillStyle = '#22c55e'
-      ctx.font = '12px sans-serif'
+      ctx.font = `${Math.max(12, Math.round(canvas.height / 36))}px sans-serif`
       ctx.fillText(`${face.identity ?? 'unknown'} (${(face.confidence * 100).toFixed(0)}%)`, x, y - 5)
+    })
+
+    // Square/box around each detected hand (bbox is normalised)
+    hands.forEach(hand => {
+      if (!hand.bbox) return
+      const bx = hand.bbox.x * canvas.width
+      const by = hand.bbox.y * canvas.height
+      const bw = hand.bbox.width * canvas.width
+      const bh = hand.bbox.height * canvas.height
+      ctx.strokeStyle = '#06b6d4'
+      ctx.lineWidth = 3
+      ctx.strokeRect(bx, by, bw, bh)
+      ctx.fillStyle = '#06b6d4'
+      ctx.font = `${Math.max(12, Math.round(canvas.height / 36))}px sans-serif`
+      ctx.fillText(`${hand.hand} ${hand.type}`, bx, Math.max(12, by - 6))
     })
 
     if (hands.length > 0) {
@@ -484,7 +583,32 @@ function App() {
       ctx.font = '12px sans-serif'
       ctx.fillText(gestureText, 15, canvas.height - 15)
     }
-  }, [faces, hands])
+
+    // Debug overlay: index fingertip of every hand. Red = POINTING (drives the
+    // OS cursor); amber = any other gesture. The preview stream is unmirrored,
+    // so raw coordinates are used.
+    hands.forEach(hand => {
+      const pt = hand.pointer ?? hand.fingertip
+      if (!pt) return
+      const pointing = hand.type === 'pointing'
+      const dotX = pt.x * canvas.width
+      const dotY = pt.y * canvas.height
+      const rgb = pointing ? '239, 68, 68' : '245, 158, 11'
+
+      ctx.beginPath()
+      ctx.arc(dotX, dotY, pointing ? 14 : 10, 0, Math.PI * 2)
+      ctx.fillStyle = `rgba(${rgb}, 0.25)`
+      ctx.fill()
+
+      ctx.beginPath()
+      ctx.arc(dotX, dotY, pointing ? 8 : 5, 0, Math.PI * 2)
+      ctx.fillStyle = `rgba(${rgb}, 0.95)`
+      ctx.fill()
+      ctx.strokeStyle = 'white'
+      ctx.lineWidth = 2
+      ctx.stroke()
+    })
+  }, [faces, hands, frameSize])
 
   useEffect(() => { drawDetections() }, [drawDetections])
 
@@ -508,9 +632,29 @@ function App() {
       {activeTab === 'main' && (
         <div className="main-content">
           {/* ── Camera ── */}
-          <div className="card camera-container">
-            <img src="/api/video/stream" alt="Camera feed" />
+          <div className="camera-column">
+          <div className="card camera-container" style={{ aspectRatio: `${frameSize.width} / ${frameSize.height}` }}>
+            <img ref={streamImgRef} key={streamKey} src={`/api/video/stream?k=${streamKey}`} alt="Camera feed" />
             <canvas ref={overlayCanvasRef} className="camera-overlay" />
+          </div>
+          <div className="card camera-select">
+            <label htmlFor="camera-select">Camera</label>
+            <select
+              id="camera-select"
+              value={currentCamera ?? ''}
+              onChange={e => handleSelectCamera(Number(e.target.value))}
+            >
+              {cameras.map(c => (
+                <option key={c.index} value={c.index}>{c.name}</option>
+              ))}
+            </select>
+            {cameraError && <p className="form-error">{cameraError}</p>}
+            <p className="empty-hint debug-line">
+              {hands.length === 0
+                ? 'Debug: no hand detected'
+                : 'Debug: ' + hands.map(h => `${h.type}${h.fingertip ? ` tip=(${h.fingertip.x.toFixed(2)}, ${h.fingertip.y.toFixed(2)})` : ''}`).join(' | ')}
+            </p>
+          </div>
           </div>
 
           {/* ── Sidebar ── */}
@@ -616,6 +760,23 @@ function App() {
                   ))
                 )}
               </div>
+              <form
+                className="identity-form"
+                onSubmit={e => { e.preventDefault(); handleEnrollIdentity() }}
+              >
+                <input
+                  type="text"
+                  placeholder="Name, then face the camera"
+                  value={newIdentity}
+                  onChange={e => setNewIdentity(e.target.value)}
+                />
+                <button type="submit" disabled={enrolling || !newIdentity.trim()}>
+                  {enrolling ? 'Enrolling…' : 'Enroll from camera'}
+                </button>
+              </form>
+              {identityMsg && (
+                <p className={identityMsg.ok ? 'form-ok' : 'form-error'}>{identityMsg.text}</p>
+              )}
             </div>
 
             {/* Metrics */}

@@ -17,7 +17,7 @@ import time
 import threading
 import json
 from pathlib import Path
-from typing import Optional, Dict, Any, Callable, List
+from typing import Optional, Dict, Any, Callable, List, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -404,19 +404,223 @@ class ShellAction:
             return ActionResult.FAILURE
 
 
+class HyprlandPointer:
+    """Cursor control on Hyprland (Wayland) without X11.
+
+    Moves via the Hyprland IPC socket (``dispatch movecursor X Y``, absolute
+    layout coordinates) and clicks via ``ydotool`` (needs ydotoold running).
+    The camera is mapped onto one monitor: ``$CAMMY_MONITOR`` if set, else the
+    monitor that is focused when the backend starts.
+    """
+
+    def __init__(self) -> None:
+        import os
+        import shutil
+
+        self.available = False
+        self._sock_path: Optional[str] = None
+        self._ydotool: Optional[str] = None
+        self._env: Dict[str, str] = {}
+        self.origin: Tuple[int, int] = (0, 0)
+        self.size: Tuple[int, int] = (1920, 1080)
+
+        # Not on Hyprland: bail out before touching any Unix-only API
+        # (os.getuid does not exist on Windows).
+        sig = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE")
+        if not sig:
+            return
+        runtime = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+        self._sock_path = f"{runtime}/hypr/{sig}/.socket.sock"
+        self._ydotool = shutil.which("ydotool")
+        self._env = dict(os.environ)
+        self._env.setdefault("YDOTOOL_SOCKET", f"{runtime}/.ydotool_socket")
+
+        if not os.path.exists(self._sock_path):
+            return
+        try:
+            self._load_monitor(os.environ.get("CAMMY_MONITOR"))
+        except Exception as e:
+            logger.warning(f"Hyprland monitor lookup failed: {e}")
+            return
+        self.available = True
+        if not (self._ydotool and os.path.exists(self._env["YDOTOOL_SOCKET"])):
+            logger.warning("ydotool/ydotoold not available: pointer will move but not click")
+            self._ydotool = None
+        logger.info(f"Hyprland pointer control on {self.monitor} {self.size} at {self.origin}")
+
+    def _load_monitor(self, wanted: Optional[str]) -> None:
+        import subprocess
+
+        out = subprocess.run(
+            ["hyprctl", "monitors", "-j"], capture_output=True, text=True, timeout=3, check=True
+        ).stdout
+        monitors = json.loads(out)
+        chosen = next((m for m in monitors if m["name"] == wanted), None) if wanted else None
+        chosen = chosen or next((m for m in monitors if m.get("focused")), monitors[0])
+        scale = chosen.get("scale", 1.0) or 1.0
+        self.monitor = chosen["name"]
+        self.origin = (int(chosen["x"]), int(chosen["y"]))
+        width, height = chosen["width"], chosen["height"]
+        # Hyprland reports the untransformed pixel size; for 90/270 degree
+        # rotations (transform 1, 3 and the flipped 5, 7) logical width/height swap.
+        if int(chosen.get("transform", 0) or 0) % 2 == 1:
+            width, height = height, width
+        self.size = (int(width / scale), int(height / scale))
+
+    def _dispatch(self, command: str) -> bool:
+        import socket
+
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(1.0)
+            sock.connect(self._sock_path)
+            sock.sendall(command.encode())
+            return sock.recv(256).decode().strip() == "ok"
+
+    def move_to(self, x: int, y: int) -> bool:
+        return self._dispatch(f"dispatch movecursor {self.origin[0] + x} {self.origin[1] + y}")
+
+    def click(self) -> bool:
+        if not self._ydotool:
+            return False
+        import subprocess
+
+        # 0xC0 = left button down + up
+        r = subprocess.run(
+            [self._ydotool, "click", "0xC0"], env=self._env, capture_output=True, timeout=2
+        )
+        return r.returncode == 0
+
+
+class MouseControlAction:
+    """Mouse cursor movement and click actions via finger pointer tracking.
+
+    Uses exponential moving average (EMA) smoothing to reduce jitter.
+    The X axis is mirrored so that moving the finger right moves the cursor
+    right, matching the typical mirrored camera preview.
+    """
+
+    def __init__(self, smoothing: float = 0.2):
+        """Initialize mouse control action.
+
+        Args:
+            smoothing: EMA alpha (0–1). Lower = smoother but laggier.
+        """
+        self._smoothing = smoothing
+        self._smooth_x: Optional[float] = None
+        self._smooth_y: Optional[float] = None
+        self._pyautogui = None
+        self._screen_size: Optional[Tuple[int, int]] = None
+        self._hypr: Optional[HyprlandPointer] = None
+
+        # Prefer the native compositor backend: pyautogui may import fine under
+        # XWayland yet only reach X11 windows.
+        pointer = HyprlandPointer()
+        if pointer.available:
+            self._hypr = pointer
+            logger.info("MouseControlAction using Hyprland backend")
+
+        if self._hypr is None and PYAUTOGUI_AVAILABLE:
+            import pyautogui
+
+            self._pyautogui = pyautogui
+            self._pyautogui.FAILSAFE = False
+            self._pyautogui.PAUSE = 0
+            logger.info("MouseControlAction initialized")
+        elif self._hypr is None:
+            logger.warning("pyautogui not available for mouse control")
+
+    def _get_screen_size(self) -> Tuple[int, int]:
+        if self._hypr:
+            return self._hypr.size
+        if self._screen_size is None and self._pyautogui:
+            self._screen_size = self._pyautogui.size()
+        return self._screen_size or (1920, 1080)
+
+    def _apply_ema(self, new_value: float, smooth_value: Optional[float]) -> float:
+        """Apply one EMA step: alpha * new + (1-alpha) * old."""
+        if smooth_value is None:
+            return new_value
+        return self._smoothing * new_value + (1 - self._smoothing) * smooth_value
+
+    def move(self, norm_x: float, norm_y: float) -> ActionResult:
+        """Move the cursor to a normalised position (0–1).
+
+        Args:
+            norm_x: Normalised X in camera frame (0 = left, 1 = right)
+            norm_y: Normalised Y in camera frame (0 = top,  1 = bottom)
+
+        Returns:
+            ActionResult
+        """
+        if not self._pyautogui and not self._hypr:
+            return ActionResult.SKIP
+
+        # Mirror X so that right-in-camera → right-on-screen
+        mirrored_x = 1.0 - norm_x
+
+        # EMA smoothing
+        self._smooth_x = self._apply_ema(mirrored_x, self._smooth_x)
+        self._smooth_y = self._apply_ema(norm_y, self._smooth_y)
+
+        screen_w, screen_h = self._get_screen_size()
+        # Clamp to the last pixel: 1.0 * width is one past the edge, which on a
+        # multi-monitor layout is the neighbouring monitor.
+        screen_x = min(int(max(0.0, min(self._smooth_x, 1.0)) * screen_w), screen_w - 1)
+        screen_y = min(int(max(0.0, min(self._smooth_y, 1.0)) * screen_h), screen_h - 1)
+
+        try:
+            if self._hypr:
+                ok = self._hypr.move_to(screen_x, screen_y)
+                return ActionResult.SUCCESS if ok else ActionResult.FAILURE
+            self._pyautogui.moveTo(screen_x, screen_y, duration=0)
+            return ActionResult.SUCCESS
+        except Exception as e:
+            logger.error(f"Mouse move failed: {e}")
+            return ActionResult.FAILURE
+
+    def click(self) -> ActionResult:
+        """Perform a left-click at the current cursor position.
+
+        Returns:
+            ActionResult
+        """
+        if not self._pyautogui and not self._hypr:
+            return ActionResult.SKIP
+
+        try:
+            if self._hypr:
+                return ActionResult.SUCCESS if self._hypr.click() else ActionResult.FAILURE
+            self._pyautogui.click()
+            logger.debug("Mouse click")
+            return ActionResult.SUCCESS
+        except Exception as e:
+            logger.error(f"Mouse click failed: {e}")
+            return ActionResult.FAILURE
+
+    def reset_smoothing(self) -> None:
+        """Reset EMA state so the next move starts without lag."""
+        self._smooth_x = None
+        self._smooth_y = None
+
+
 class ActionExecutor:
     """Main action executor with gesture mapping and debouncing."""
+
+    # Cooldown for the built-in mouse click (OK_SIGN gesture), in milliseconds.
+    MOUSE_CLICK_COOLDOWN_MS: int = 800
 
     def __init__(
         self,
         mapper: Optional[ActionMapper] = None,
         cooldown_ms: int = 1000,
+        mouse_control_enabled: bool = True,
     ):
         """Initialize action executor.
 
         Args:
             mapper: Gesture to action mapper
             cooldown_ms: Default cooldown between triggers
+            mouse_control_enabled: Enable finger-pointer mouse control
         """
         self._mapper = mapper or ActionMapper()
         self._cooldown_ms = cooldown_ms
@@ -424,12 +628,14 @@ class ActionExecutor:
         self._key_press = KeyPressAction()
         self._webhook = WebhookAction()
         self._shell = ShellAction()
+        self._mouse_control = MouseControlAction()
 
         # Debounce tracking
         self._last_action_time: Dict[str, float] = {}
         self._lock = threading.Lock()
 
         self._enabled = True
+        self._mouse_enabled = mouse_control_enabled
 
         # Callback called after each successful action
         self._on_action_executed: Optional[Callable[[Dict[str, Any]], None]] = None
@@ -448,6 +654,10 @@ class ActionExecutor:
     ) -> List[Action]:
         """Execute actions based on detected hands.
 
+        POINTING gesture moves the mouse cursor (continuous, no cooldown).
+        OK_SIGN gesture performs a mouse click (with click_cooldown_ms cooldown).
+        All other gestures are dispatched through the normal gesture→action mapping.
+
         Args:
             hands: List of detected hands
 
@@ -455,15 +665,53 @@ class ActionExecutor:
             List of executed actions
         """
         if not self._enabled or not hands:
+            # Reset mouse smoothing when no hands are visible
+            if self._mouse_enabled:
+                self._mouse_control.reset_smoothing()
             return []
 
         executed = []
+
+        # Reset smoothing when no hand is pointing this frame
+        if self._mouse_enabled and not any(h.gesture == GestureType.POINTING for h in hands):
+            self._mouse_control.reset_smoothing()
 
         for hand in hands:
             gesture = hand.gesture
             if gesture == GestureType.UNKNOWN or gesture == GestureType.NONE:
                 continue
 
+            # ── Mouse pointer control ──────────────────────────────────────
+            if self._mouse_enabled and gesture == GestureType.POINTING:
+                if hand.landmarks and len(hand.landmarks) > 8:
+                    self._mouse_control.move(hand.landmarks[8][0], hand.landmarks[8][1])
+                # POINTING is reserved for cursor movement; skip regular actions
+                continue
+
+            if self._mouse_enabled and gesture == GestureType.OK_SIGN:
+                # OK_SIGN (pinch) = left click with debounce
+                if self._check_cooldown("mouse_click", self.MOUSE_CLICK_COOLDOWN_MS):
+                    result = self._mouse_control.click()
+                    self._update_cooldown("mouse_click")
+                    if result != ActionResult.FAILURE:
+                        action = Action(
+                            action_type=ActionType.MOUSE_CLICK,
+                            action_name="mouse_click",
+                            payload={},
+                            timestamp=time.time(),
+                        )
+                        executed.append(action)
+                        self._notify_executed(
+                            action_name="mouse_click",
+                            label="Mouse click",
+                            gesture=gesture,
+                            timestamp=action.timestamp,
+                            cooldown_ms=self.MOUSE_CLICK_COOLDOWN_MS,
+                        )
+                # OK_SIGN is reserved for click; skip regular actions
+                continue
+
+            # ── Regular gesture → action dispatch ─────────────────────────
             action_config = self._mapper.get_action(gesture)
             if not action_config:
                 continue
@@ -488,20 +736,38 @@ class ActionExecutor:
                 )
                 executed.append(action)
 
-                if self._on_action_executed is not None:
-                    try:
-                        self._on_action_executed({
-                            "type": "action_executed",
-                            "action_name": action_name,
-                            "label": action_config.label or action_name,
-                            "gesture": gesture.name.lower(),
-                            "timestamp": action.timestamp,
-                            "cooldown_ms": action_config.cooldown_ms,
-                        })
-                    except Exception as e:
-                        logger.warning(f"action_executed callback failed: {e}")
+                self._notify_executed(
+                    action_name=action_name,
+                    label=action_config.label or action_name,
+                    gesture=gesture,
+                    timestamp=action.timestamp,
+                    cooldown_ms=action_config.cooldown_ms,
+                )
 
         return executed
+
+    def _notify_executed(
+        self,
+        action_name: str,
+        label: str,
+        gesture: GestureType,
+        timestamp: float,
+        cooldown_ms: int,
+    ) -> None:
+        """Tell the action_executed callback (WebSocket broadcast) about an action."""
+        if self._on_action_executed is None:
+            return
+        try:
+            self._on_action_executed({
+                "type": "action_executed",
+                "action_name": action_name,
+                "label": label,
+                "gesture": gesture.name.lower(),
+                "timestamp": timestamp,
+                "cooldown_ms": cooldown_ms,
+            })
+        except Exception as e:
+            logger.warning(f"action_executed callback failed: {e}")
 
     def _check_cooldown(self, action_name: str, cooldown_ms: int) -> bool:
         """Check if action is off cooldown."""
@@ -541,6 +807,17 @@ class ActionExecutor:
         """Disable action execution."""
         self._enabled = False
 
+    def enable_mouse_control(self) -> None:
+        """Enable finger-pointer mouse control."""
+        self._mouse_enabled = True
+        logger.info("Mouse control enabled")
+
+    def disable_mouse_control(self) -> None:
+        """Disable finger-pointer mouse control."""
+        self._mouse_enabled = False
+        self._mouse_control.reset_smoothing()
+        logger.info("Mouse control disabled")
+
     @property
     def mapper(self) -> ActionMapper:
         """Get the action mapper."""
@@ -551,11 +828,17 @@ class ActionExecutor:
         """Check if enabled."""
         return self._enabled
 
+    @property
+    def mouse_control_enabled(self) -> bool:
+        """Check if mouse control is enabled."""
+        return self._mouse_enabled
+
 
 def create_action_executor(
     mapping: Optional[Dict[GestureType, str]] = None,
     cooldown_ms: int = 1000,
     commands_manager: Optional[CommandsManager] = None,
+    mouse_control_enabled: bool = True,
 ) -> ActionExecutor:
     """Factory to create action executor.
 
@@ -563,9 +846,10 @@ def create_action_executor(
         mapping: Custom gesture to action mapping (ignored when commands_manager provided)
         cooldown_ms: Default cooldown
         commands_manager: Persistent command store
+        mouse_control_enabled: Enable finger-pointer mouse control
 
     Returns:
         ActionExecutor instance
     """
     mapper = ActionMapper(mapping, commands_manager=commands_manager)
-    return ActionExecutor(mapper=mapper, cooldown_ms=cooldown_ms)
+    return ActionExecutor(mapper=mapper, cooldown_ms=cooldown_ms, mouse_control_enabled=mouse_control_enabled)

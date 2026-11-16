@@ -14,6 +14,7 @@ CODEMAP:
 
 import threading
 import time
+from pathlib import Path
 from typing import Optional, List, Callable, Any
 from dataclasses import dataclass
 
@@ -57,6 +58,28 @@ def get_available_cameras() -> List[CameraInfo]:
     return [c for c in cameras if c.available]
 
 
+def list_camera_devices() -> List[CameraInfo]:
+    """List capture-capable cameras without opening them.
+
+    On Linux this reads /sys/class/video4linux (one capture node per physical
+    camera; the odd-numbered nodes are metadata streams). Falls back to
+    probing indices with OpenCV elsewhere.
+    """
+    sysfs = Path("/sys/class/video4linux")
+    if sysfs.is_dir():
+        cameras = []
+        for node in sorted(sysfs.glob("video*"), key=lambda p: int(p.name[5:])):
+            try:
+                if (node / "index").read_text().strip() != "0":
+                    continue
+                name = (node / "name").read_text().strip()
+                cameras.append(CameraInfo(index=int(node.name[5:]), name=f"{name} (/dev/{node.name})", available=True))
+            except (OSError, ValueError):
+                continue
+        return cameras
+    return get_available_cameras()
+
+
 class CameraReader(threading.Thread):
     """Thread-based camera reader for continuous frame capture.
 
@@ -86,6 +109,8 @@ class CameraReader(threading.Thread):
         self._metrics = metrics
         self._cap: Optional[cv2.VideoCapture] = None
         self._running = False
+        # Persistent cancel signal: survives a slow VideoCapture() open, unlike _running
+        self._stop_event = threading.Event()
         self._frame_time = 1.0 / target_fps
         self._latest_frame: Optional[CameraFrame] = None
         self._latest_frame_lock = threading.Lock()
@@ -94,8 +119,15 @@ class CameraReader(threading.Thread):
         """Main capture loop running in thread."""
         self._cap = cv2.VideoCapture(self._device_index)
 
+        if self._stop_event.is_set():
+            # Cancelled while the (possibly slow) open was in progress
+            self._cap.release()
+            logger.info(f"Camera {self._device_index} open cancelled")
+            return
+
         if not self._cap.isOpened():
             logger.error(f"Cannot open camera {self._device_index}")
+            self._cap.release()
             return
 
         # Configure camera
@@ -106,7 +138,7 @@ class CameraReader(threading.Thread):
         self._running = True
         logger.info(f"Camera reader started for device {self._device_index}")
 
-        while self._running:
+        while self._running and not self._stop_event.is_set():
             with LatencyTracker(self._metrics or SystemMetrics(), "capture"):
                 ret, frame = self._cap.read()
 
@@ -141,12 +173,13 @@ class CameraReader(threading.Thread):
         logger.info("Camera reader stopped")
 
     def stop(self) -> None:
-        """Stop the camera reader."""
+        """Stop the camera reader (also cancels a pending open)."""
+        self._stop_event.set()
         self._running = False
 
     def is_running(self) -> bool:
         """Check if reader is running."""
-        return self._running
+        return self._running and not self._stop_event.is_set()
 
     def peek_latest_frame(self) -> Optional[CameraFrame]:
         """Return the most recent frame without consuming it from the queue."""
@@ -176,6 +209,8 @@ class CameraCapture:
         self._metrics = SystemMetrics()
         self._frame_queue: Optional[ThreadSafeQueue] = None
         self._error: Optional[str] = None
+        # Serializes start/stop/set_device so only one reader owns capture
+        self._lock = threading.RLock()
 
     def start(self) -> bool:
         """Start camera capture.
@@ -183,6 +218,10 @@ class CameraCapture:
         Returns:
             True if successful, False otherwise
         """
+        with self._lock:
+            return self._start_locked()
+
+    def _start_locked(self) -> bool:
         try:
             self._frame_queue = ThreadSafeQueue(maxsize=2, name="camera_frames")
             self._reader = CameraReader(
@@ -202,11 +241,12 @@ class CameraCapture:
 
     def stop(self) -> None:
         """Stop camera capture."""
-        if self._reader:
-            self._reader.stop()
-            self._reader.join(timeout=2.0)
-            self._reader = None
-        logger.info("Camera capture stopped")
+        with self._lock:
+            if self._reader:
+                self._reader.stop()
+                self._reader.join(timeout=2.0)
+                self._reader = None
+            logger.info("Camera capture stopped")
 
     def get_frame(
         self, block: bool = True, timeout: float = 1.0
@@ -220,11 +260,13 @@ class CameraCapture:
         Returns:
             CameraFrame if available, None otherwise
         """
-        if self._frame_queue is None:
+        # Snapshot: a concurrent camera switch may replace the queue
+        queue = self._frame_queue
+        if queue is None:
             return None
 
         try:
-            return self._frame_queue.get(block=block, timeout=timeout)
+            return queue.get(block=block, timeout=timeout)
         except:
             return None
 
@@ -233,13 +275,41 @@ class CameraCapture:
 
         Safe to call from the MJPEG stream — does not starve face/hand pipelines.
         """
-        if self._reader is None:
+        reader = self._reader  # snapshot: a concurrent switch may clear it
+        if reader is None:
             return None
-        return self._reader.peek_latest_frame()
+        return reader.peek_latest_frame()
 
     def get_available_cameras(self) -> List[CameraInfo]:
         """Get list of available cameras."""
-        return get_available_cameras()
+        return list_camera_devices()
+
+    @property
+    def device_index(self) -> int:
+        """Index of the camera currently selected."""
+        return self._config.device_index
+
+    def set_device(self, device_index: int) -> bool:
+        """Switch to another camera, restarting capture.
+
+        Falls back to the previous camera if the new one cannot be opened.
+        """
+        with self._lock:  # serialize the whole switch, including rollback
+            previous = self._config.device_index
+            self.stop()
+            self._config.device_index = device_index
+            self.start()
+            # The reader opens the device in its thread; give it a moment.
+            deadline = time.time() + 3.0
+            while time.time() < deadline:
+                if self.is_running():
+                    return True
+                time.sleep(0.05)
+            logger.error(f"Camera {device_index} failed to open, reverting to {previous}")
+            self.stop()
+            self._config.device_index = previous
+            self.start()
+            return False
 
     def get_error(self) -> Optional[str]:
         """Get last error message."""
@@ -247,7 +317,8 @@ class CameraCapture:
 
     def is_running(self) -> bool:
         """Check if capture is running."""
-        return self._reader is not None and self._reader.is_running()
+        reader = self._reader  # snapshot: a concurrent switch may clear it
+        return reader is not None and reader.is_running()
 
     @property
     def metrics(self) -> SystemMetrics:

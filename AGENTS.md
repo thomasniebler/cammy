@@ -75,6 +75,9 @@ cd backend
 python -m pytest tests/
 ```
 
+Frontend tests (vitest + Testing Library, mocked `fetch`) live next to the code, e.g. `frontend/src/App.test.tsx`.
+Run everything with `task test` (or `task test-backend` / `task test-frontend`; `task install-frontend` first).
+
 ## Key Types
 
 Defined in `common/types.py`:

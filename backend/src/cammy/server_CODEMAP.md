@@ -43,7 +43,9 @@ src/cammy/server.py
 | GET | `/config` | Get configuration |
 | POST | `/config` | Update configuration |
 | GET | `/identities` | List identities |
-| POST | `/identities` | Create identity |
+| POST | `/identities` | Enroll the face in the latest camera frame under `name` (validated: letters/digits/space/`_.-`, max 64; 400 invalid, 422 no face) |
+| GET | `/cameras` | List cameras and the current device index |
+| POST | `/camera` | Switch camera `{device_index}` (422 if it cannot be opened) |
 | DELETE | `/identities/{name}` | Delete identity |
 | GET | `/metrics` | Get system metrics |
 | GET | `/gestures/mapping` | Get gesture mappings |
