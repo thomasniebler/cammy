@@ -122,6 +122,53 @@ class TestSetDevice(unittest.TestCase):
         self.assertEqual(state["idx"], 0)
 
 
+class TestSetDeviceConcurrency(unittest.TestCase):
+    def test_overlapping_switches_leave_exactly_one_reader(self):
+        import threading
+        import time as _time
+
+        import cammy.camera_capture as cc
+
+        live = set()
+        created = []
+
+        class Reader:
+            def __init__(self, device_index, **kw):
+                self.i = device_index
+                created.append(self)
+
+            def start(self):
+                live.add(self)
+
+            def stop(self):
+                live.discard(self)
+
+            def join(self, timeout=None):
+                _time.sleep(0.05)  # widen the race window
+
+            def is_running(self):
+                return self in live
+
+        orig = cc.CameraReader
+        cc.CameraReader = Reader
+        self.addCleanup(setattr, cc, "CameraReader", orig)
+
+        cap = CameraCapture()
+        cap.start()
+        results = []
+        threads = [
+            threading.Thread(target=lambda i=i: results.append(cap.set_device(i))) for i in (1, 2, 3)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(results, [True, True, True])
+        self.assertEqual(len(live), 1, "orphaned reader left running")
+        self.assertEqual(next(iter(live)).i, cap.device_index)
+
+
 class TestMouseGestureThreshold(unittest.TestCase):
     def _pipeline(self, gesture, conf):
         from cammy.common.metrics import SystemMetrics

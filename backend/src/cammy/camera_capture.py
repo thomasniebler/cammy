@@ -199,6 +199,8 @@ class CameraCapture:
         self._metrics = SystemMetrics()
         self._frame_queue: Optional[ThreadSafeQueue] = None
         self._error: Optional[str] = None
+        # Serializes start/stop/set_device so only one reader owns capture
+        self._lock = threading.RLock()
 
     def start(self) -> bool:
         """Start camera capture.
@@ -206,6 +208,10 @@ class CameraCapture:
         Returns:
             True if successful, False otherwise
         """
+        with self._lock:
+            return self._start_locked()
+
+    def _start_locked(self) -> bool:
         try:
             self._frame_queue = ThreadSafeQueue(maxsize=2, name="camera_frames")
             self._reader = CameraReader(
@@ -225,11 +231,12 @@ class CameraCapture:
 
     def stop(self) -> None:
         """Stop camera capture."""
-        if self._reader:
-            self._reader.stop()
-            self._reader.join(timeout=2.0)
-            self._reader = None
-        logger.info("Camera capture stopped")
+        with self._lock:
+            if self._reader:
+                self._reader.stop()
+                self._reader.join(timeout=2.0)
+                self._reader = None
+            logger.info("Camera capture stopped")
 
     def get_frame(
         self, block: bool = True, timeout: float = 1.0
@@ -274,21 +281,22 @@ class CameraCapture:
 
         Falls back to the previous camera if the new one cannot be opened.
         """
-        previous = self._config.device_index
-        self.stop()
-        self._config.device_index = device_index
-        self.start()
-        # The reader opens the device in its thread; give it a moment.
-        deadline = time.time() + 3.0
-        while time.time() < deadline:
-            if self.is_running():
-                return True
-            time.sleep(0.05)
-        logger.error(f"Camera {device_index} failed to open, reverting to {previous}")
-        self.stop()
-        self._config.device_index = previous
-        self.start()
-        return False
+        with self._lock:  # serialize the whole switch, including rollback
+            previous = self._config.device_index
+            self.stop()
+            self._config.device_index = device_index
+            self.start()
+            # The reader opens the device in its thread; give it a moment.
+            deadline = time.time() + 3.0
+            while time.time() < deadline:
+                if self.is_running():
+                    return True
+                time.sleep(0.05)
+            logger.error(f"Camera {device_index} failed to open, reverting to {previous}")
+            self.stop()
+            self._config.device_index = previous
+            self.start()
+            return False
 
     def get_error(self) -> Optional[str]:
         """Get last error message."""
