@@ -418,16 +418,24 @@ class HyprlandPointer:
         import shutil
 
         self.available = False
-        sig = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE")
-        runtime = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
-        self._sock_path = f"{runtime}/hypr/{sig}/.socket.sock" if sig else None
-        self._ydotool = shutil.which("ydotool")
-        self._env = dict(os.environ)
-        self._env.setdefault("YDOTOOL_SOCKET", f"{runtime}/.ydotool_socket")
+        self._sock_path: Optional[str] = None
+        self._ydotool: Optional[str] = None
+        self._env: Dict[str, str] = {}
         self.origin: Tuple[int, int] = (0, 0)
         self.size: Tuple[int, int] = (1920, 1080)
 
-        if not (self._sock_path and os.path.exists(self._sock_path)):
+        # Not on Hyprland: bail out before touching any Unix-only API
+        # (os.getuid does not exist on Windows).
+        sig = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE")
+        if not sig:
+            return
+        runtime = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+        self._sock_path = f"{runtime}/hypr/{sig}/.socket.sock"
+        self._ydotool = shutil.which("ydotool")
+        self._env = dict(os.environ)
+        self._env.setdefault("YDOTOOL_SOCKET", f"{runtime}/.ydotool_socket")
+
+        if not os.path.exists(self._sock_path):
             return
         try:
             self._load_monitor(os.environ.get("CAMMY_MONITOR"))
@@ -686,6 +694,13 @@ class ActionExecutor:
                             timestamp=time.time(),
                         )
                         executed.append(action)
+                        self._notify_executed(
+                            action_name="mouse_click",
+                            label="Mouse click",
+                            gesture=gesture,
+                            timestamp=action.timestamp,
+                            cooldown_ms=self.MOUSE_CLICK_COOLDOWN_MS,
+                        )
                 # OK_SIGN is reserved for click; skip regular actions
                 continue
 
@@ -714,20 +729,38 @@ class ActionExecutor:
                 )
                 executed.append(action)
 
-                if self._on_action_executed is not None:
-                    try:
-                        self._on_action_executed({
-                            "type": "action_executed",
-                            "action_name": action_name,
-                            "label": action_config.label or action_name,
-                            "gesture": gesture.name.lower(),
-                            "timestamp": action.timestamp,
-                            "cooldown_ms": action_config.cooldown_ms,
-                        })
-                    except Exception as e:
-                        logger.warning(f"action_executed callback failed: {e}")
+                self._notify_executed(
+                    action_name=action_name,
+                    label=action_config.label or action_name,
+                    gesture=gesture,
+                    timestamp=action.timestamp,
+                    cooldown_ms=action_config.cooldown_ms,
+                )
 
         return executed
+
+    def _notify_executed(
+        self,
+        action_name: str,
+        label: str,
+        gesture: GestureType,
+        timestamp: float,
+        cooldown_ms: int,
+    ) -> None:
+        """Tell the action_executed callback (WebSocket broadcast) about an action."""
+        if self._on_action_executed is None:
+            return
+        try:
+            self._on_action_executed({
+                "type": "action_executed",
+                "action_name": action_name,
+                "label": label,
+                "gesture": gesture.name.lower(),
+                "timestamp": timestamp,
+                "cooldown_ms": cooldown_ms,
+            })
+        except Exception as e:
+            logger.warning(f"action_executed callback failed: {e}")
 
     def _check_cooldown(self, action_name: str, cooldown_ms: int) -> bool:
         """Check if action is off cooldown."""

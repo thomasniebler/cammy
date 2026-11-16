@@ -68,6 +68,21 @@ class TestAvailability(unittest.TestCase):
         self.assertFalse(p.click())
 
 
+class TestNonHyprlandPlatforms(unittest.TestCase):
+    def test_no_unix_only_calls_without_hyprland(self):
+        """Windows has no os.getuid; construction must not touch it off Hyprland."""
+        import os
+
+        with mock.patch.dict("os.environ", {}, clear=True), \
+             mock.patch.object(os, "getuid", side_effect=AttributeError("no getuid"), create=True):
+            p = REAL_HYPRLAND()
+        self.assertFalse(p.available)
+
+    def test_empty_runtime_dir_falls_back_to_uid(self):
+        p = make(extra_env={"XDG_RUNTIME_DIR": ""}, exists=lambda path: False)
+        self.assertFalse(p.available)  # socket missing, but no crash
+
+
 class TestMonitorSelection(unittest.TestCase):
     def test_focused_monitor_with_scale(self):
         p = make()
@@ -144,3 +159,50 @@ class TestBackendPrecedence(unittest.TestCase):
             action = MouseControlAction()
         self.assertIsNone(action._hypr)
         self.assertIs(action._pyautogui, fake)
+
+
+class TestClickBroadcast(unittest.TestCase):
+    def test_successful_click_invokes_action_callback(self):
+        from cammy.action_executor import ActionExecutor
+        from cammy.common import DetectedHand, GestureType
+
+        class FakeMouse:
+            def click(self):
+                return ActionResult.SUCCESS
+
+            def move(self, x, y):
+                return ActionResult.SUCCESS
+
+            def reset_smoothing(self):
+                pass
+
+        events = []
+        ex = ActionExecutor()
+        ex._mouse_control = FakeMouse()
+        ex.set_on_action_executed(events.append)
+        ex.execute([DetectedHand(gesture=GestureType.OK_SIGN, gesture_confidence=0.9)])
+
+        self.assertEqual(len(events), 1)
+        e = events[0]
+        self.assertEqual(e["type"], "action_executed")
+        self.assertEqual(e["action_name"], "mouse_click")
+        self.assertEqual(e["gesture"], "ok_sign")
+        self.assertEqual(e["cooldown_ms"], ActionExecutor.MOUSE_CLICK_COOLDOWN_MS)
+
+    def test_failed_click_does_not_broadcast(self):
+        from cammy.action_executor import ActionExecutor
+        from cammy.common import DetectedHand, GestureType
+
+        class FailMouse:
+            def click(self):
+                return ActionResult.FAILURE
+
+            def reset_smoothing(self):
+                pass
+
+        events = []
+        ex = ActionExecutor()
+        ex._mouse_control = FailMouse()
+        ex.set_on_action_executed(events.append)
+        ex.execute([DetectedHand(gesture=GestureType.OK_SIGN, gesture_confidence=0.9)])
+        self.assertEqual(events, [])
