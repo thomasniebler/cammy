@@ -103,11 +103,28 @@ class DetectedHand:
             "confidence": round(self.gesture_confidence, 2),
             "hand": self.hand_type.value,
         }
-        if self.gesture == GestureType.POINTING and self.landmarks and len(self.landmarks) > 8:
-            result["pointer"] = {
+        if self.landmarks:
+            xs = [lm[0] for lm in self.landmarks]
+            ys = [lm[1] for lm in self.landmarks]
+            pad = 0.02
+            x0, y0 = max(0.0, min(xs) - pad), max(0.0, min(ys) - pad)
+            x1, y1 = min(1.0, max(xs) + pad), min(1.0, max(ys) + pad)
+            # Normalised (0-1) bounding box around the whole hand
+            result["bbox"] = {
+                "x": round(x0, 4),
+                "y": round(y0, 4),
+                "width": round(x1 - x0, 4),
+                "height": round(y1 - y0, 4),
+            }
+        if self.landmarks and len(self.landmarks) > 8:
+            tip = {
                 "x": round(self.landmarks[8][0], 4),
                 "y": round(self.landmarks[8][1], 4),
             }
+            # Index fingertip for every hand (used by the UI debug overlay)
+            result["fingertip"] = tip
+            if self.gesture == GestureType.POINTING:
+                result["pointer"] = dict(tip)
         return result
 
 

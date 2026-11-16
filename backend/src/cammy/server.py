@@ -11,6 +11,7 @@ CODEMAP:
 - CammyServer: Combined server manager
 """
 
+import os
 import asyncio
 import json
 import threading
@@ -354,6 +355,9 @@ class RestAPI:
             name: str
             metadata: Optional[Dict] = None
 
+        class CameraSelect(BaseModel):
+            device_index: int
+
         class GestureMapping(BaseModel):
             gesture: str
             action: str
@@ -397,10 +401,53 @@ class RestAPI:
 
         @app.post("/api/identities")
         async def create_identity(identity: IdentityCreate):
-            if self._face_pipeline:
-                # Note: Would need frame - simplified
-                return {"status": "ok", "name": identity.name}
-            raise HTTPException(status_code=500, detail="Face pipeline not set")
+            """Enroll the face currently visible in the camera under a name."""
+            if not self._face_pipeline:
+                raise HTTPException(status_code=500, detail="Face pipeline not set")
+            name = identity.name.strip()
+            if not name:
+                raise HTTPException(status_code=400, detail="Name is required")
+            frame = self._camera.get_latest_frame() if self._camera else None
+            if frame is None:
+                raise HTTPException(status_code=503, detail="No camera frame available")
+            loop = asyncio.get_event_loop()
+            ok = await loop.run_in_executor(
+                None,
+                lambda: self._face_pipeline.enroll_identity(
+                    name, frame.frame, metadata=identity.metadata
+                ),
+            )
+            if not ok:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Could not enroll: no face detected or embedding failed "
+                    "(is face recognition installed? see backend log)",
+                )
+            return {"status": "ok", "name": name}
+
+        @app.get("/api/cameras")
+        async def list_cameras():
+            if not self._camera:
+                raise HTTPException(status_code=503, detail="Camera not available")
+            return {
+                "current": self._camera.device_index,
+                "cameras": [
+                    {"index": c.index, "name": c.name}
+                    for c in self._camera.get_available_cameras()
+                ],
+            }
+
+        @app.post("/api/camera")
+        async def select_camera(sel: CameraSelect):
+            if not self._camera:
+                raise HTTPException(status_code=503, detail="Camera not available")
+            loop = asyncio.get_event_loop()
+            ok = await loop.run_in_executor(None, self._camera.set_device, sel.device_index)
+            if not ok:
+                raise HTTPException(status_code=422, detail=f"Cannot open camera {sel.device_index}")
+            if self._config_manager:
+                self._config_manager.update({"camera": {"device_index": sel.device_index}})
+            return {"status": "ok", "current": sel.device_index}
 
         @app.delete("/api/identities/{name}")
         async def delete_identity(name: str):
@@ -572,7 +619,7 @@ class CammyServer:
         self,
         host: str = "127.0.0.1",
         ws_port: int = 8765,
-        rest_port: int = 8000,
+        rest_port: int = int(os.environ.get("CAMMY_API_PORT", "8000")),
     ):
         """Initialize combined server.
 
@@ -709,7 +756,7 @@ class CammyServer:
 def create_server(
     host: str = "127.0.0.1",
     ws_port: int = 8765,
-    rest_port: int = 8000,
+    rest_port: int = int(os.environ.get("CAMMY_API_PORT", "8000")),
 ) -> CammyServer:
     """Factory to create server.
 

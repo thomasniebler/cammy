@@ -14,6 +14,7 @@ CODEMAP:
 
 import threading
 import time
+from pathlib import Path
 from typing import Optional, List, Callable, Any
 from dataclasses import dataclass
 
@@ -55,6 +56,28 @@ def get_available_cameras() -> List[CameraInfo]:
         else:
             cameras.append(CameraInfo(index=i, name=f"Camera {i}", available=False))
     return [c for c in cameras if c.available]
+
+
+def list_camera_devices() -> List[CameraInfo]:
+    """List capture-capable cameras without opening them.
+
+    On Linux this reads /sys/class/video4linux (one capture node per physical
+    camera; the odd-numbered nodes are metadata streams). Falls back to
+    probing indices with OpenCV elsewhere.
+    """
+    sysfs = Path("/sys/class/video4linux")
+    if sysfs.is_dir():
+        cameras = []
+        for node in sorted(sysfs.glob("video*"), key=lambda p: int(p.name[5:])):
+            try:
+                if (node / "index").read_text().strip() != "0":
+                    continue
+                name = (node / "name").read_text().strip()
+                cameras.append(CameraInfo(index=int(node.name[5:]), name=f"{name} (/dev/{node.name})", available=True))
+            except (OSError, ValueError):
+                continue
+        return cameras
+    return get_available_cameras()
 
 
 class CameraReader(threading.Thread):
@@ -239,7 +262,33 @@ class CameraCapture:
 
     def get_available_cameras(self) -> List[CameraInfo]:
         """Get list of available cameras."""
-        return get_available_cameras()
+        return list_camera_devices()
+
+    @property
+    def device_index(self) -> int:
+        """Index of the camera currently selected."""
+        return self._config.device_index
+
+    def set_device(self, device_index: int) -> bool:
+        """Switch to another camera, restarting capture.
+
+        Falls back to the previous camera if the new one cannot be opened.
+        """
+        previous = self._config.device_index
+        self.stop()
+        self._config.device_index = device_index
+        self.start()
+        # The reader opens the device in its thread; give it a moment.
+        deadline = time.time() + 3.0
+        while time.time() < deadline:
+            if self.is_running():
+                return True
+            time.sleep(0.05)
+        logger.error(f"Camera {device_index} failed to open, reverting to {previous}")
+        self.stop()
+        self._config.device_index = previous
+        self.start()
+        return False
 
     def get_error(self) -> Optional[str]:
         """Get last error message."""

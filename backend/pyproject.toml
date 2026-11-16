@@ -34,6 +34,7 @@ dev = [
 ]
 face = [
     "deepface>=0.0.81",
+    "tf-keras>=2.16",
 ]
 hand = [
     "mediapipe>=0.10.0",
