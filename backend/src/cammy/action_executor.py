@@ -558,8 +558,10 @@ class MouseControlAction:
         self._smooth_y = self._apply_ema(norm_y, self._smooth_y)
 
         screen_w, screen_h = self._get_screen_size()
-        screen_x = int(max(0.0, min(self._smooth_x, 1.0)) * screen_w)
-        screen_y = int(max(0.0, min(self._smooth_y, 1.0)) * screen_h)
+        # Clamp to the last pixel: 1.0 * width is one past the edge, which on a
+        # multi-monitor layout is the neighbouring monitor.
+        screen_x = min(int(max(0.0, min(self._smooth_x, 1.0)) * screen_w), screen_w - 1)
+        screen_y = min(int(max(0.0, min(self._smooth_y, 1.0)) * screen_h), screen_h - 1)
 
         try:
             if self._hypr:

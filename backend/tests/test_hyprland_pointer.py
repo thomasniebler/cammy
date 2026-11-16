@@ -206,3 +206,29 @@ class TestClickBroadcast(unittest.TestCase):
         ex.set_on_action_executed(events.append)
         ex.execute([DetectedHand(gesture=GestureType.OK_SIGN, gesture_confidence=0.9)])
         self.assertEqual(events, [])
+
+
+class TestEdgeClamping(unittest.TestCase):
+    def test_edges_stay_inside_selected_monitor(self):
+        calls = []
+
+        class FakeHypr:
+            size = (1920, 1080)
+
+            def move_to(self, x, y):
+                calls.append((x, y))
+                return True
+
+        for nx, ny in [(0.0, 1.0), (1.0, 0.0), (-0.5, 2.0), (1.5, -1.0)]:
+            action = MouseControlAction(smoothing=1.0)
+            action._pyautogui = None
+            action._hypr = FakeHypr()
+            action.move(nx, ny)
+
+        for x, y in calls:
+            self.assertTrue(0 <= x <= 1919, x)
+            self.assertTrue(0 <= y <= 1079, y)
+        # camera (0, 1): mirrored x=1.0 -> last column, bottom row
+        self.assertEqual(calls[0], (1919, 1079))
+        # camera (1, 0): mirrored x=0 -> first column, top row
+        self.assertEqual(calls[1], (0, 0))
